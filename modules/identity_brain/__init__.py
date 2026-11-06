@@ -389,6 +389,24 @@ async def detect_identity(phone: str, text: str = "") -> dict:
             return _build(_phone=norm, role="client_escort_buyer", confidence=95, source="env_phone",
                           priority=_ROLE_PRIORITY["client_escort_buyer"])
 
+        # ── Step 3.9: owner-set relation (fazle_contact_relations) ─────────────
+        # The only identity source a non-coder owner controls from the UI
+        # (migration 090). Deliberately placed AFTER admin/accountant/seed/
+        # employee/roster and BEFORE the wbom_contacts fallback: an explicit
+        # human decision must beat "this number is in my phone book", but must
+        # never grant privileges — modules.contact_relations.RELATION_VOCABULARY
+        # structurally cannot produce admin/accountant/employee/supervisor, and
+        # an already-verified employee is resolved at Step 3 and wins.
+        relation_row = await _lookup_contact_relation(norm)
+        if relation_row:
+            role = relation_row["identity_role"]
+            log.info(
+                "[identity] %s → %s (contact_relation=%s, trust=%s, auto_reply=%s)",
+                norm, role, relation_row.get("relation_name"),
+                relation_row.get("trust_level"), relation_row.get("auto_reply"),
+            )
+            return _build_relation(_phone=norm, role=role, relation=relation_row)
+
         # ── Step 4: contact DB lookup ──────────────────────────────────────────
         contact = await _lookup_contact(norm)
         if contact:
@@ -867,6 +885,46 @@ def _build(
         # accountant, etc.).
         "identity_lifecycle":  lifecycle,
     }
+
+
+async def _lookup_contact_relation(phone: str) -> Optional[dict]:
+    """Owner-set relation from fazle_contact_relations (Step 3.9).
+
+    Fail-open by construction: a missing table, a DB outage or a malformed row
+    returns None, and identity resolution falls through to the pre-existing
+    chain exactly as before this feature existed.
+    """
+    try:
+        from modules.contact_relations import resolution
+
+        return await resolution(phone)
+    except (AttributeError, LookupError, TypeError, ValueError) as e:
+        log.debug("[identity] contact_relation lookup skipped for %s: %s", phone, e)
+        return None
+
+
+def _build_relation(_phone: str, role: str, relation: dict) -> dict:
+    """Identity dict for an explicitly owner-assigned relation.
+
+    Extends _build() with the four contact_* keys the reply gates read
+    (bridge_poller._is_draft_always, message_router._should_silent_skip).
+    Those consumers use .get(), so identities resolved by every other step keep
+    working without carrying these keys.
+    """
+    base = _build(
+        _phone=_phone,
+        role=role,
+        confidence=98,
+        source="contact_relation",
+        priority=_ROLE_PRIORITY.get(role, 0),
+    )
+    base["display_name"] = relation.get("display_name") or base.get("display_name")
+    base["relation_name"] = relation.get("relation_name") or base.get("relation_name")
+    base["contact_relation"] = relation.get("relation_name")
+    base["contact_trust_level"] = relation.get("trust_level")
+    base["contact_auto_reply"] = relation.get("auto_reply")
+    base["contact_tone"] = relation.get("tone") or ""
+    return base
 
 
 def _build_contact(

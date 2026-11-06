@@ -99,6 +99,7 @@ small.dim{color:var(--muted);font-size:11px}
   <button data-tab="reports">Reports</button>
   <button data-tab="users">Users (B19)</button>
   <button data-tab="identity-role">Identity–Role</button>
+  <button data-tab="relations">🤝 সম্পর্ক</button>
   <button data-tab="audit">Audit</button>
   <button data-tab="backups">Backups</button>
   <button data-tab="scheduler">Scheduler</button>
@@ -229,6 +230,55 @@ small.dim{color:var(--muted);font-size:11px}
     <div class="card">
       <h3>Place hold</h3>
       <div class="row"><select id="irHoldType"><option value="identity">Identity hold</option><option value="conversation">Conversation hold</option></select><input id="irConversationKey" placeholder="Canonical conversation key (conversation only)"><input id="irHoldReason" placeholder="Required reason" style="flex:1"><button class="btn danger" onclick="placeIdentityHold()">Place hold</button></div>
+    </div>
+  </section>
+
+  <!-- CONTACT RELATIONS (migration 090) -->
+  <section id="tab-relations" class="tab">
+    <div class="card">
+      <h2>🤝 কন্টাক্ট সম্পর্ক — কে কে?</h2>
+      <p class="muted">
+        এই নম্বরটি আপনার কাছে কে — পরিবার, বন্ধু, ক্লায়েন্ট, সরবরাহকারী, সাংবাদিক, হুমকি।
+        এখানে সেট করলে AI-এর টোন, ড্রাফট/অটো-রিপ্লাই সিদ্ধান্ত সেই অনুযায়ী বদলাবে।
+        এই তালিকা থেকে কখনোই অ্যাডমিন, অ্যাকাউন্টেন্ট বা কর্মীর ক্ষমতা দেওয়া যায় না —
+        সেগুলো শুধু সার্ভারের সেটিংস ও কর্মী তালিকা থেকে আসে।
+      </p>
+      <div class="row">
+        <input id="crPhone" placeholder="ফোন (01XXXXXXXXX)" style="min-width:170px">
+        <select id="crRelation" style="min-width:190px"></select>
+        <select id="crTrust" style="min-width:150px">
+          <option value="trusted">trusted — বিশ্বস্ত</option>
+          <option value="normal" selected>normal — সাধারণ</option>
+          <option value="caution">caution — সতর্ক</option>
+          <option value="blocked">blocked — ব্লকড</option>
+        </select>
+        <select id="crAutoReply" style="min-width:180px">
+          <option value="inherit" selected>inherit — ডিফল্ট নিয়ম</option>
+          <option value="always_draft">always_draft — সবসময় ড্রাফট</option>
+          <option value="never_reply">never_reply — কখনো উত্তর নয়</option>
+        </select>
+        <input id="crNote" placeholder="টোন/নোট (যেমন: চাচাতো ভাই)" style="flex:1;min-width:180px">
+        <button class="btn" onclick="saveRelation()">সংরক্ষণ করুন</button>
+      </div>
+      <div id="crMsg" class="muted"></div>
+    </div>
+
+    <div class="card">
+      <h2>শ্রেণিবিহীন কন্টাক্ট <span id="crUnclassifiedCount" class="pill warn"></span></h2>
+      <p class="muted">
+        আপনার ফোনবুকে সেভ করা কিন্তু এখনো সম্পর্ক সেট করা হয়নি এমন নম্বর।
+        যাদের সাথে সবচেয়ে সম্প্রতি কথা হয়েছে তারা উপরে — এখান থেকেই এক ক্লিকে ঠিক করে ফেলুন।
+      </p>
+      <div id="crUnclassified" class="muted">লোড হচ্ছে…</div>
+    </div>
+
+    <div class="card">
+      <h2>সব সম্পর্ক</h2>
+      <div class="row">
+        <input id="crFilter" placeholder="নম্বর বা সম্পর্ক দিয়ে খুঁজুন">
+        <button class="btn" onclick="loadRelations()">Refresh</button>
+      </div>
+      <div id="crList" class="muted">লোড হচ্ছে…</div>
     </div>
   </section>
 
@@ -829,6 +879,7 @@ function loadTab(tab){
   else if(tab==="reports"){ loadReportsList(); }
   else if(tab==="users") loadUsers();
   else if(tab==="identity-role") loadIdentityRole();
+  else if(tab==="relations") loadRelations();
   else if(tab==="audit") loadAudit();
   else if(tab==="backups") loadBackups();
   else if(tab==="scheduler") loadScheduler();
@@ -1053,6 +1104,141 @@ function refreshAll(){
 setInterval(()=>{ document.getElementById("clock").textContent = new Date().toLocaleTimeString(); }, 1000);
 
 // boot
+
+// ── Contact Relations registry (migration 090) ───────────────────────────────
+// The owner-editable answer to "who is this number?". Reads/writes
+// /admin/contact-relations. Never renders a privileged role: the vocabulary
+// endpoint cannot return admin/accountant/employee/supervisor.
+let CR_VOCAB = null;
+
+async function crVocabulary(){
+  if(CR_VOCAB) return CR_VOCAB;
+  try{
+    const v = await api("/admin/contact-relations/vocabulary");
+    CR_VOCAB = v.items || [];
+  }catch(e){ CR_VOCAB = []; }
+  const sel = document.getElementById("crRelation");
+  if(sel) sel.innerHTML = '<option value="">— সম্পর্ক নির্বাচন করুন —</option>' +
+    CR_VOCAB.map(r=>`<option value="${r.code}">${r.bn} — ${r.label}</option>`).join("");
+  return CR_VOCAB;
+}
+
+function crOptions(selected){
+  return '<option value="">— নির্বাচন —</option>' + (CR_VOCAB||[]).map(r=>
+    `<option value="${r.code}"${r.code===selected?" selected":""}>${r.bn} — ${r.label}</option>`).join("");
+}
+
+function crFmt(ts){ return ts ? String(ts).slice(0,16).replace("T"," ") : "—"; }
+
+async function loadRelations(){
+  try{
+    await crVocabulary();
+    const [un, rel] = await Promise.all([
+      api("/admin/contact-relations/unclassified?limit=100"),
+      api("/admin/contact-relations?limit=200")
+    ]);
+    renderUnclassified(un);
+    renderRelations(rel);
+  }catch(e){
+    const u=document.getElementById("crUnclassified"), l=document.getElementById("crList");
+    if(u) u.innerHTML = `<span class="pill err">${escapeHtml(e.message)}</span>`;
+    if(l) l.innerHTML = "";
+  }
+}
+
+function renderUnclassified(d){
+  const items = (d && d.items) || [];
+  const total = (d && d.total != null) ? d.total : items.length;
+  const cnt = document.getElementById("crUnclassifiedCount");
+  if(cnt){ cnt.textContent = total + " জন"; cnt.className = total ? "pill warn" : "pill ok"; }
+  const box = document.getElementById("crUnclassified");
+  if(!box) return;
+  if(!items.length){
+    box.innerHTML = '<span class="pill ok">সব কন্টাক্ট শ্রেণিভুক্ত ✅</span>';
+    return;
+  }
+  box.innerHTML = '<table><thead><tr><th>নম্বর</th><th>সেভ করা নাম</th><th>শেষ মেসেজ</th><th>সম্পর্ক দিন</th><th></th></tr></thead><tbody>' +
+    items.map(c => `<tr>
+      <td>${escapeHtml(c.phone)}</td>
+      <td>${escapeHtml(c.display_name || "—")}</td>
+      <td>${crFmt(c.last_message_at)}</td>
+      <td><select data-phone="${escapeHtml(c.phone)}">${crOptions("")}</select></td>
+      <td><button class="btn" onclick="quickAssign(this)">সংরক্ষণ</button></td>
+    </tr>`).join("") + '</tbody></table>';
+}
+
+function renderRelations(d){
+  const box = document.getElementById("crList");
+  if(!box) return;
+  const q = (document.getElementById("crFilter")?.value || "").trim().toLowerCase();
+  let items = (d && d.items) || [];
+  if(q) items = items.filter(r =>
+    String(r.phone||"").toLowerCase().includes(q) ||
+    String(r.relation_name||"").toLowerCase().includes(q));
+  if(!items.length){
+    box.innerHTML = '<span class="muted">কোনো সম্পর্ক এখনো সেট করা হয়নি। উপরের ফর্ম বা শ্রেণিবিহীন তালিকা থেকে শুরু করুন।</span>';
+    return;
+  }
+  box.innerHTML = '<table><thead><tr><th>নম্বর</th><th>সম্পর্ক</th><th>Trust</th><th>Auto-reply</th><th>নোট</th><th>হালনাগাদ</th><th></th></tr></thead><tbody>' +
+    items.map(r => `<tr>
+      <td>${escapeHtml(r.phone)}</td>
+      <td><b>${escapeHtml(r.relation_name)}</b></td>
+      <td>${escapeHtml(r.trust_level)}</td>
+      <td>${escapeHtml(r.auto_reply)}</td>
+      <td>${escapeHtml(r.tone || r.notes || "—")}</td>
+      <td>${crFmt(r.updated_at)}</td>
+      <td><button class="btn danger" onclick="deleteRelation('${escapeHtml(r.phone)}')">মুছুন</button></td>
+    </tr>`).join("") + '</tbody></table>';
+}
+
+async function saveRelation(){
+  const phone = (document.getElementById("crPhone").value || "").trim();
+  const relation = document.getElementById("crRelation").value;
+  const msg = document.getElementById("crMsg");
+  if(!phone || !relation){
+    if(msg) msg.innerHTML = '<span class="pill err">ফোন নম্বর ও সম্পর্ক — দুটোই দিতে হবে।</span>';
+    return;
+  }
+  try{
+    await api("/admin/contact-relations", { method:"POST", body:{
+      phone, relation,
+      trust_level: document.getElementById("crTrust").value,
+      auto_reply:  document.getElementById("crAutoReply").value,
+      tone:        (document.getElementById("crNote").value || "").trim(),
+      actor:       "dashboard"
+    }});
+    if(msg) msg.innerHTML = '<span class="pill ok">সংরক্ষণ হয়েছে ✅</span>';
+    document.getElementById("crPhone").value = "";
+    document.getElementById("crNote").value = "";
+    await loadRelations();
+  }catch(e){
+    if(msg) msg.innerHTML = `<span class="pill err">${escapeHtml(e.message)}</span>`;
+  }
+}
+
+async function quickAssign(btn){
+  const tr = btn.closest("tr");
+  const sel = tr ? tr.querySelector("select") : null;
+  if(!sel) return;
+  const phone = sel.getAttribute("data-phone");
+  const relation = sel.value;
+  if(!relation){ alert("আগে একটি সম্পর্ক নির্বাচন করুন।"); return; }
+  try{
+    await api("/admin/contact-relations", { method:"POST", body:{
+      phone, relation, actor:"dashboard-quick"
+    }});
+    await loadRelations();
+  }catch(e){ alert(e.message); }
+}
+
+async function deleteRelation(phone){
+  if(!confirm(`${phone} — এই সম্পর্কটি মুছে ফেলবেন?`)) return;
+  try{
+    await api("/admin/contact-relations/" + encodeURIComponent(phone), { method:"DELETE" });
+    await loadRelations();
+  }catch(e){ alert(e.message); }
+}
+
 if(apiKey){ hideLogin(); refreshAll(); } else { showLogin(); }
 document.getElementById("keyInput").addEventListener("keydown", e=>{ if(e.key==="Enter") doLogin(); });
 </script>

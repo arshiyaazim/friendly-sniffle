@@ -380,6 +380,32 @@ input:checked + .slider:before{transform:translateX(20px)}
     <input id="cModalName" placeholder="Display name">
     <label>Auto-detected Role</label>
     <input id="cModalRole" readonly style="background:#f5f5f5">
+
+    <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px">
+      <div style="font-size:12px;font-weight:600;color:var(--accent2);margin-bottom:8px">
+        🤝 সম্পর্ক ও আচরণ <span style="font-weight:400;color:var(--muted)">(Relation &amp; behaviour)</span>
+      </div>
+      <label>সম্পর্ক (who is this?)</label>
+      <select id="cModalRelation">
+        <option value="">— এখনো সেট করা হয়নি —</option>
+      </select>
+      <label>বিশ্বাসের মাত্রা (trust)</label>
+      <select id="cModalTrust">
+        <option value="trusted">trusted — বিশ্বস্ত</option>
+        <option value="normal">normal — সাধারণ</option>
+        <option value="caution">caution — সতর্ক</option>
+        <option value="blocked">blocked — ব্লকড (কখনো উত্তর নয়)</option>
+      </select>
+      <label>স্বয়ংক্রিয় উত্তর (auto-reply)</label>
+      <select id="cModalAutoReply">
+        <option value="inherit">inherit — ডিফল্ট নিয়ম মানুন</option>
+        <option value="always_draft">always_draft — সবসময় ড্রাফটে রাখুন</option>
+        <option value="never_reply">never_reply — কখনো উত্তর দেবেন না</option>
+      </select>
+      <label>টোন / নোট</label>
+      <input id="cModalRelationNotes" placeholder="যেমন: চাচাতো ভাই — ঘরোয়াভাবে কথা বলুন">
+    </div>
+
     <label>Auto-Reply Status</label>
     <div id="cModalBlocked" style="font-size:12px;margin-top:4px;padding:6px 10px;background:#fff3cd;border-radius:5px"></div>
     <div class="modal-actions">
@@ -940,6 +966,34 @@ async function triggerSync() {
 
 // ── Contact Modal ─────────────────────────────────────────────────────────────
 let contactModalPhone = null;
+let relationVocabulary = null;
+
+// Vocabulary is loaded once and cached; a failure degrades to the static
+// "not set" option rather than blocking the modal.
+async function loadRelationVocabulary() {
+  if (relationVocabulary) return relationVocabulary;
+  try {
+    const d = await apiJson('/admin/contact-relations/vocabulary');
+    relationVocabulary = d.items || [];
+  } catch (e) {
+    relationVocabulary = [];
+  }
+  const sel = document.getElementById('cModalRelation');
+  if (!sel) return relationVocabulary;
+  sel.innerHTML = '<option value="">— এখনো সেট করা হয়নি —</option>' +
+    relationVocabulary.map(r =>
+      `<option value="${escHtml(r.code)}">${escHtml(r.bn)} — ${escHtml(r.label)}</option>`
+    ).join('');
+  return relationVocabulary;
+}
+
+function relationCodeFor(label) {
+  if (!label || !relationVocabulary) return '';
+  const hit = relationVocabulary.find(r =>
+    r.label.toLowerCase() === String(label).toLowerCase() ||
+    r.code.toLowerCase() === String(label).toLowerCase());
+  return hit ? hit.code : '';
+}
 
 async function openContactModal(phone) {
   if (!phone) return;
@@ -950,6 +1004,7 @@ async function openContactModal(phone) {
     document.getElementById('cModalPhone').value = d.phone || phone;
     document.getElementById('cModalName').value = d.display_name || '';
     document.getElementById('cModalRole').value = d.identity_role || '—';
+    await fillRelationFields(d.relation);
     const blockedEl = document.getElementById('cModalBlocked');
     if (d.auto_reply_blocked) {
       blockedEl.textContent = '🚫 Auto-reply is BLOCKED for this number';
@@ -965,10 +1020,20 @@ async function openContactModal(phone) {
       document.getElementById('cModalPhone').value = phone;
       document.getElementById('cModalName').value = '';
       document.getElementById('cModalRole').value = '—';
+      await fillRelationFields(null);
       document.getElementById('cModalBlocked').textContent = 'Not in contact book';
       document.getElementById('contactModal').classList.add('open');
     }
   }
+}
+
+async function fillRelationFields(relation) {
+  await loadRelationVocabulary();
+  const rel = relation || {};
+  document.getElementById('cModalRelation').value = relationCodeFor(rel.relation_name) || '';
+  document.getElementById('cModalTrust').value = rel.trust_level || 'normal';
+  document.getElementById('cModalAutoReply').value = rel.auto_reply || 'inherit';
+  document.getElementById('cModalRelationNotes').value = rel.tone || '';
 }
 
 function closeContactModal() {
@@ -979,12 +1044,25 @@ function closeContactModal() {
 async function saveContact() {
   if (!contactModalPhone) return;
   const name = document.getElementById('cModalName').value.trim();
+  const payload = { display_name: name };
+  const relation = document.getElementById('cModalRelation').value;
+  if (relation) {
+    payload.relation = relation;
+    payload.trust_level = document.getElementById('cModalTrust').value;
+    payload.auto_reply = document.getElementById('cModalAutoReply').value;
+    payload.relation_tone = document.getElementById('cModalRelationNotes').value.trim();
+  }
   try {
-    await apiFetch(`/api/wa/contacts/${encodeURIComponent(contactModalPhone)}`, {
+    const r = await apiFetch(`/api/wa/contacts/${encodeURIComponent(contactModalPhone)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ display_name: name }),
+      body: JSON.stringify(payload),
     });
+    if (r.status === 422) {
+      const err = await r.json().catch(() => ({}));
+      showToast(err.detail || 'Invalid relation', 'err');
+      return;
+    }
     showToast('Contact updated', 'ok');
     closeContactModal();
     loadContacts(true);

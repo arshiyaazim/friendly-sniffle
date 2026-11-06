@@ -64,6 +64,7 @@ from modules.admin_transactions import router as admin_transactions_router
 from modules.social_auto_reply import ingest_social_event, start_social_auto_reply, stop_social_auto_reply
 from modules.social_auto_reply.routes import router as social_auto_reply_router
 from modules.contact_roles.routes import router as contact_roles_router
+from modules.contact_relations.routes import router as contact_relations_router
 from modules.preflight_guard.routes import router as preflight_guard_router
 from modules.ai_route_registry import router as ai_route_registry_router
 from modules.system_secret_store import router as system_secret_store_router
@@ -496,6 +497,7 @@ app.include_router(kb_upload_router)
 app.include_router(admin_employees_router)   # Phase 18B — Admin Employee CRUD
 app.include_router(admin_transactions_router) # Phase 19 — Admin Transaction CRUD
 app.include_router(contact_roles_router)      # P2-4 — Contact roles CRUD
+app.include_router(contact_relations_router)  # Migration 090 — owner-managed contact relation registry
 app.include_router(drafts_router)             # /api/drafts/* — restored 2026-07-08, was imported but never mounted
 app.include_router(draft_approval_router)     # /api/payment-drafts/* — Task 2, 2026-08-19
 app.include_router(hermes_tasks_router)       # /api/tasks/*, /api/actions/* — persistent task-state + action approval, 2026-08-19
