@@ -1,0 +1,139 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+*.pyd
+*.so
+
+# Virtual environment
+venv/
+venv
+env/
+.venv/
+.env/
+
+# Environment variables (NEVER commit secrets)
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+
+# Database files
+*.sqlite3
+*.db
+*.dump
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Testing
+.pytest_cache/
+.coverage
+coverage/
+htmlcov/
+/tests/coverage-unit.xml
+/tests/e2e/screenshots/
+/tests/fixtures/phase3/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node (frontend)
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Compiled
+*.pyc
+*.class
+
+# Temporary
+*.tmp
+*.bak
+*.orig
+*.bak.*
+
+# Generated KB artifacts (produced by scripts/sync_knowledge_base_to_runtime.py)
+resources/generated_kb/
+
+# Reports (private contact/employee data)
+reports/
+
+# Local infra / GitHub Models integration
+github-models/
+
+# Internal audit / planning documents
+audit-*.md
+consolidation-plan*.md
+RECRUITMENT_BOT_COORDINATION.md
+
+# Internal business documentation and production-derived data
+/docs/
+/knowledge_base/
+/audits/
+/audit-report/
+/HERMES_ADMIN_BRIDGE_HANDOFF_2026/
+/resources/ops/
+/resources/_internal_archived/
+/tests/unit/data/recruitment_regression_corpus/
+/SYSTEM_ATLAS.md
+/BUSINESS-CONSTITUTION.md
+/MASTER_PLAN_KNOWLEDGE_BASE_BRAIN.md
+/db/MIGRATION_INVENTORY.md
+/scripts/import_missing_advance_transactions.py
+/scripts/recover_critical_numbers.py
+/app/static/assets/company-logo.png
+
+# Exclude internal root documents unless they are sanitized public guides
+/*.md
+!/README.md
+!/MASTER_PRODUCTION_PLAN.md
+
+# Exclude private operational resources and local runtime state
+/.claude/
+/.kilo/
+/archive/
+/store/
+/resources/*
+!/resources/csv_templates/
+!/resources/csv_templates/**
+/db/.env_flags_acknowledged
+/AUDIT_SUMMARY.json
+/recover_critical_numbers.py
+/recover_from_backup.py
+/fazle-core.service
+/fazle-social-auto-reply.service
+
+# Exclude internal Markdown except the sanitized public guides
+**/*.md
+!README.md
+!MASTER_PRODUCTION_PLAN.md
+
+# Keep one generic scanner; other scripts are operational or data-specific
+/scripts/*
+!/scripts/secret_scan.sh
+
+# Backup files
+backups/
+cleanup-log*.txt
+cleanup-post-state.json
+
+# Runtime lock for the canonical Recruitment authority register. Keep this
+# exact-path rule narrow: other lock/runtime artifacts must remain visible.
+/knowledge_base/00_governance/recruitment_fact_authority.json.lock
+moonshot_test.py

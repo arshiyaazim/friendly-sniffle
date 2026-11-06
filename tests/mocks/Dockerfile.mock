@@ -1,0 +1,13 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install curl for health checks
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+
+COPY tests/requirements-test.txt /app/requirements-test.txt
+RUN pip install --no-cache-dir -r requirements-test.txt
+
+COPY . /app/
+
+EXPOSE 8201 8202 11434

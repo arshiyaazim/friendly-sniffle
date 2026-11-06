@@ -1,0 +1,134 @@
+version: "3.9"
+
+services:
+
+  # ── PostgreSQL (test DB) ─────────────────────────────────────────────────
+  # SECURITY (2026-07-17 incident, see
+  # knowledge_base/00_governance/incidents/2026-07-17_test_postgres_public_exposure.md):
+  # this was previously "5433:5432" (all interfaces) with a hardcoded trivial
+  # password — reachable from the public internet, hit by a real Postgres RCE
+  # exploit attempt within minutes, twice. Bound to 127.0.0.1 only + password
+  # now required from the environment, no hardcoded fallback. Never remove
+  # the 127.0.0.1: prefix, and never hardcode a password here again.
+  postgres-test:
+    image: postgres:15-alpine
+    container_name: fazle-test-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${TEST_DB_PASSWORD:?Set TEST_DB_PASSWORD before starting the test stack — no hardcoded fallback, see the 2026-07-17 exposure incident}
+      POSTGRES_DB: fazle_test
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - fazle-test-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d fazle_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── Redis (for queue/dedup, avoids conflict with prod on 6379) ───────────
+  # SECURITY: same class of issue as postgres-test above (all-interfaces
+  # bind, no auth) — bound to 127.0.0.1 only. Redis itself has no password
+  # configured here; do not publish this on a non-loopback interface.
+  redis-test:
+    image: redis:7-alpine
+    container_name: fazle-test-redis
+    ports:
+      - "127.0.0.1:6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── Mock Bridge 1 ────────────────────────────────────────────────────────
+  mock-bridge1:
+    build:
+      context: .
+      dockerfile: tests/mocks/Dockerfile.mock
+    container_name: fazle-mock-bridge1
+    command: uvicorn tests.mocks.bridge_mock_server:app --host 0.0.0.0 --port 8201
+    ports:
+      - "8201:8201"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8201/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── Mock Bridge 2 ────────────────────────────────────────────────────────
+  mock-bridge2:
+    build:
+      context: .
+      dockerfile: tests/mocks/Dockerfile.mock
+    container_name: fazle-mock-bridge2
+    command: uvicorn tests.mocks.bridge_mock_server:app --host 0.0.0.0 --port 8202
+    ports:
+      - "8202:8202"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8202/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── Mock Ollama ──────────────────────────────────────────────────────────
+  mock-ollama:
+    build:
+      context: .
+      dockerfile: tests/mocks/Dockerfile.mock
+    container_name: fazle-mock-ollama
+    command: uvicorn tests.mocks.ollama_mock:app --host 0.0.0.0 --port 11434
+    ports:
+      - "11435:11434"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:11434/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── Test Runner ──────────────────────────────────────────────────────────
+  test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fazle-test-runner
+    environment:
+      TEST_DATABASE_URL: "postgresql://postgres:${TEST_DB_PASSWORD:?Set TEST_DB_PASSWORD before starting the test stack}@postgres-test:5432/fazle_test"
+      BRIDGE1_URL: "http://mock-bridge1:8201"
+      BRIDGE2_URL: "http://mock-bridge2:8202"
+      OLLAMA_BASE_URL: "http://mock-ollama:11434"
+      REDIS_URL: "redis://redis-test:6379/0"
+      INTERNAL_API_KEY: "test-internal-key"
+      ADMIN_NUMBERS: "8801700000001,8801700000002"
+      META_VERIFY_TOKEN: "test_verify_token"
+      ENVIRONMENT: "test"
+    command: >
+      bash -c "
+        echo 'Waiting for DB...' &&
+        until pg_isready -h postgres-test -U postgres; do sleep 1; done &&
+        echo 'Running tests...' &&
+        python -m pytest tests/ -m 'not e2e and not load'
+          --timeout=60
+          --cov=app --cov=modules
+          --cov-report=term-missing
+          --cov-report=xml:tests/coverage.xml
+          -v
+      "
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+      redis-test:
+        condition: service_healthy
+      mock-bridge1:
+        condition: service_healthy
+      mock-bridge2:
+        condition: service_healthy
+      mock-ollama:
+        condition: service_healthy
+    volumes:
+      - ./tests:/app/tests
+      - ./tests/coverage.xml:/app/tests/coverage.xml
+
+volumes:
+  fazle-test-pg-data:

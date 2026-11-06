@@ -1,0 +1,4 @@
+employee_mobile,attendance_date,status,location,check_in_time,check_out_time,remarks
+01712345678,2026-05-01,Present,Port Area,2026-05-01T08:00:00+06:00,2026-05-01T17:00:00+06:00,
+01712345678,2026-05-02,Absent,,,,"Sick leave"
+01811111111,2026-05-01,Present,Outer Anchorage,,,

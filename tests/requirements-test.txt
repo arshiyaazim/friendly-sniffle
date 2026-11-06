@@ -1,0 +1,40 @@
+# ── Test dependencies for Fazle Core ─────────────────────────────────────────
+# Install: pip install -r tests/requirements-test.txt
+
+# Core test runner
+pytest==8.3.4
+pytest-asyncio==0.24.0
+pytest-cov==6.0.0
+pytest-timeout==2.3.1
+pytest-xdist==3.6.1          # parallel test execution
+pytest-mock==3.14.0
+
+# HTTP testing
+httpx==0.28.0
+respx==0.21.1                 # mock httpx requests
+
+# Async support
+anyio==4.13.0
+
+# DB testing
+asyncpg==0.30.0
+
+# Mock servers
+fastapi==0.115.5
+uvicorn==0.32.1
+
+# Playwright E2E
+playwright==1.49.0
+pytest-playwright==0.6.2
+
+# Load testing
+locust==2.32.3
+
+# Assertions & helpers
+faker==33.1.0
+freezegun==1.5.1              # freeze time in tests
+factory-boy==3.3.1
+
+# Coverage
+coverage[toml]==7.6.9
+pytest-html>=4.1.1

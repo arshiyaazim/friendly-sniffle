@@ -1,0 +1,953 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dispatch — Availability &amp; Controlled Assignment</title>
+<style>
+:root{--bg:#fff8f5;--card:#fff;--accent:#FD3101;--accent2:#db2800;--err:#dc2626;--warn:#d97706;--ok:#16a34a;--muted:#64748b;--border:#e2e8f0;--surface:#f8fafc;--text:#1e293b}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Georgia,serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5;padding:20px}
+h1{color:var(--accent);font-size:20px;margin-bottom:4px}
+h2{font-size:15px;margin:18px 0 10px;color:var(--accent2)}
+p.sub{color:var(--muted);font-size:13px;margin-bottom:12px}
+.pagelinks{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:10px}
+.pagelinks a{color:var(--accent2);text-decoration:none;font-size:12px}
+.pagelinks a:hover{text-decoration:underline}
+#loginBox{max-width:420px;margin:60px auto;background:#fff;padding:28px;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.12)}
+#loginBox input{width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:8px;font-size:14px;margin-bottom:10px}
+#loginBox button{width:100%;padding:10px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer}
+#app{display:none;max-width:1100px;margin:0 auto}
+.readonly-banner{background:#fef3c7;color:#92400e;border:1.5px solid #fcd34d;border-radius:8px;padding:10px 14px;margin-bottom:16px;font-size:13px;font-weight:600;text-align:center}
+.card{background:#fff;border-radius:10px;padding:16px 18px;box-shadow:0 1px 4px rgba(0,0,0,.07);margin-bottom:16px}
+.filter-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:12px}
+.suggest-wrap{position:relative}
+.suggest-drop{display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.12);max-height:220px;overflow-y:auto;z-index:50;margin-top:2px}
+.suggest-drop.open{display:block}
+.suggest-drop .suggest-row{padding:8px 12px;cursor:pointer;font-size:13px}
+.suggest-drop .suggest-row:hover{background:var(--surface)}
+.suggest-drop .suggest-row .name{font-weight:600}
+.suggest-drop .suggest-row .meta{font-size:11px;color:var(--muted)}
+.field label{display:block;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px}
+.field input,.field select{width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:13px}
+.btn{padding:9px 16px;border-radius:7px;border:1px solid var(--border);background:#fff;cursor:pointer;font-size:13px;font-weight:600}
+.btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+#tableHost{overflow-x:auto}
+table{width:100%;min-width:640px;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden}
+th,td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--border);font-size:12.5px}
+th{background:var(--surface);color:var(--muted);text-transform:uppercase;font-size:10.5px;letter-spacing:.4px}
+tr.available td{color:var(--ok)}
+.pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+.pill.ok{background:#dcfce7;color:#166534}
+.pill.err{background:#fee2e2;color:#991b1b}
+.pill.warn{background:#fef3c7;color:#92400e}
+.status{font-size:12px;margin-top:6px}
+.status.err{color:var(--err)}
+.empty{text-align:center;padding:30px 20px;color:var(--muted)}
+.rank-badge{display:inline-block;width:22px;height:22px;line-height:22px;text-align:center;border-radius:50%;background:var(--accent);color:#fff;font-size:11px;font-weight:700;margin-right:6px}
+.reasons{font-size:11.5px;color:var(--muted)}
+.mono{font-family:monospace}
+details.conflict-detail{margin-top:4px;font-size:12px}
+details.conflict-detail summary{cursor:pointer;color:var(--accent2)}
+.suggestion-row{cursor:pointer}
+.suggestion-row:hover{background:var(--surface)}
+.assign-banner{background:#e0f2fe;color:#075985;border:1.5px solid #7dd3fc;border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:12.5px;font-weight:600}
+.overlap-note{background:#fef3c7;color:#92400e;border:1.5px solid #fcd34d;border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:12.5px}
+.overlap-group{border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px}
+.overlap-pair{font-size:12px;color:var(--err);margin:4px 0}
+.confirm-box{border:2px solid var(--accent);border-radius:8px;padding:12px 14px;margin-top:10px;background:#fff8f5}
+.confirm-box dl{display:grid;grid-template-columns:140px 1fr;gap:4px 10px;font-size:12.5px;margin:8px 0}
+.confirm-box dt{color:var(--muted);font-weight:600}
+.hidden{display:none !important}
+@media (max-width:640px){.filter-grid{grid-template-columns:1fr 1fr}.btn{min-height:44px}}
+</style>
+</head>
+<body>
+
+<div id="loginBox">
+  <h1>Dispatch Preview</h1>
+  <p class="sub">Read-only availability and conflict detection. Requires the same admin key as other internal tools.</p>
+  <input id="keyInput" type="password" placeholder="API Key">
+  <button onclick="doLogin()">Continue</button>
+  <div id="loginErr" style="color:var(--err);font-size:12px;margin-top:6px"></div>
+</div>
+
+<div id="app">
+  <h1>Dispatch <a href="/unmatched-confirmations" style="float:right;font-size:13px;font-weight:normal">→ Unmatched Confirmations review queue</a></h1>
+  <div class="pagelinks">
+    <a href="/">Dashboard</a>
+    <a href="/payroll">Payroll</a>
+    <a href="/escort-roster">Escort Roster</a>
+    <a href="/drafts">Drafts</a>
+    <a href="/kb">KB</a>
+    <a href="/open-chat">Open Chat</a>
+    <a href="/wa-chat">WA Chat</a>
+    <a href="/wbom-create-link">WBOM Create Link</a>
+    <a href="/wbom-link-review">WBOM Link Review</a>
+  </div>
+  <div class="readonly-banner">🔒 Availability, conflict detection, and suggestions below are read-only — nothing here writes to the database.</div>
+  <div id="assignBanner" class="assign-banner hidden">✓ Your role can perform controlled manual assignment — see the Assign / Reassign Escort section below.</div>
+  <p class="sub">Escort-worker availability and conflict detection, derived from <code>wbom_escort_programs</code> (the canonical assignment source).</p>
+
+  <div class="card">
+    <h2>Check Availability</h2>
+    <div class="filter-grid">
+      <div class="field"><label>Start Date</label><input id="fStartDate" type="date"></div>
+      <div class="field"><label>Start Shift</label>
+        <select id="fStartShift"><option value="D">Day (D)</option><option value="N">Night (N)</option></select></div>
+      <div class="field"><label>End Date</label><input id="fEndDate" type="date"></div>
+      <div class="field"><label>End Shift</label>
+        <select id="fEndShift"><option value="N" selected>Night (N)</option><option value="D">Day (D)</option></select></div>
+      <div class="field"><label>Employee ID (optional)</label><input id="fEmployeeId" type="number" placeholder="e.g. 143"></div>
+      <div class="field"><label>Destination (optional)</label><input id="fDestination" type="text" placeholder="e.g. Narayanganj"></div>
+    </div>
+    <button class="btn primary" onclick="checkAvailability()">Check Availability</button>
+    <button class="btn" onclick="loadAllWorkers()">List All Escort Workers</button>
+    <div id="filterStatus" class="status"></div>
+  </div>
+
+  <div class="card">
+    <h2>Availability Results</h2>
+    <div id="progress" style="font-size:12.5px;color:var(--muted);margin-bottom:10px"></div>
+    <div id="tableHost"></div>
+  </div>
+
+  <div class="card">
+    <h2>Ranked Suggestions</h2>
+    <p class="sub">Deterministic ranking — no AI/LLM involved. Only eligible, available employees are shown. Click a suggestion to fill it into the Assign section below (does not submit anything).</p>
+    <div id="suggestionsHost"></div>
+  </div>
+
+  <div id="assignCard" class="card hidden">
+    <h2>Assign / Reassign Escort</h2>
+    <p class="sub">Controlled manual assignment. Nothing is written until you explicitly confirm below. The backend re-validates eligibility and conflicts inside the same transaction regardless of what this page shows.</p>
+    <div class="filter-grid">
+      <div class="field"><label>Program ID</label><input id="aProgramId" type="number" placeholder="e.g. 818"></div>
+      <div class="field"><label>Escort Employee ID</label><input id="aEmployeeId" type="number" placeholder="e.g. 143"></div>
+    </div>
+    <button class="btn primary" onclick="loadProgramForAssign()">Load Program</button>
+    <div id="assignStatus" class="status"></div>
+    <div id="programHost"></div>
+    <div id="confirmHost"></div>
+  </div>
+
+  <div class="card">
+    <h2>Existing Overlaps</h2>
+    <div class="overlap-note">Existing overlaps require manual business review. No automatic correction is performed here.</div>
+    <button class="btn" onclick="loadOverlaps()">Refresh Overlaps</button>
+    <div id="overlapsProgress" style="font-size:12.5px;color:var(--muted);margin:8px 0"></div>
+    <div id="overlapsHost"></div>
+  </div>
+
+  <div id="sameVesselCard" class="card">
+    <h2>Same-Vessel Review Queue</h2>
+    <p class="sub">Read-only classification of possible same-vessel escort changes/corrections (Phase 2A.3 Decision 3/6). Nothing here is applied automatically — every candidate requires the applicable guarded workflow (Replace Escort below, or manual review) before any real change.</p>
+    <button class="btn" onclick="loadSameVesselQueue()">Refresh Queue</button>
+    <div id="sameVesselProgress" style="font-size:12.5px;color:var(--muted);margin:8px 0"></div>
+    <div id="sameVesselHost"></div>
+  </div>
+
+  <div id="replaceCard" class="card hidden">
+    <h2>Replace Escort (Historical Correction / Manual Trigger)</h2>
+    <p class="sub">Manually create a replacement segment for an earlier program (Phase 2A.3 Stage 3) — the same workflow the automatic admin-message pipeline uses. Requires the earlier program's ID and the full new-segment details.</p>
+    <div class="filter-grid">
+      <div class="field"><label>Earlier Program ID</label><input id="rProgramId" type="number"></div>
+      <div class="field"><label>Mother Vessel</label><input id="rMotherVessel" type="text"></div>
+      <div class="field"><label>Lighter Vessel</label><input id="rLighterVessel" type="text"></div>
+      <div class="field"><label>New Escort Employee ID (optional)</label><input id="rEmployeeId" type="number"></div>
+      <div class="field">
+        <label>New Escort Name</label>
+        <div class="suggest-wrap">
+          <input id="rEscortName" type="text" autocomplete="off">
+          <div id="rEscortNameDrop" class="suggest-drop"></div>
+        </div>
+      </div>
+      <div class="field"><label>New Escort Mobile</label><input id="rEscortMobile" type="text"></div>
+      <div class="field"><label>New Start Date</label><input id="rStartDate" type="date"></div>
+      <div class="field"><label>New Start Shift</label><select id="rStartShift"><option value="D">Day (D)</option><option value="N">Night (N)</option></select></div>
+    </div>
+    <button class="btn primary" onclick="submitReplaceEscort()">Submit Replacement</button>
+    <div id="replaceStatus" class="status"></div>
+  </div>
+
+  <div id="unassignCard" class="card hidden">
+    <h2>Safe Unassignment</h2>
+    <p class="sub">Draft/confirmed programs only — blocked by accepted attendance or an existing payment draft. Never hard-deletes the program.</p>
+    <div class="filter-grid">
+      <div class="field"><label>Program ID</label><input id="uProgramId" type="number"></div>
+      <div class="field"><label>Expected Current Employee ID</label><input id="uEmployeeId" type="number"></div>
+    </div>
+    <div class="field"><label>Reason (mandatory)</label><input id="uReason" type="text" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px"></div>
+    <button class="btn primary" onclick="submitUnassign()" style="margin-top:8px">Unassign</button>
+    <div id="unassignStatus" class="status"></div>
+  </div>
+
+  <div id="incompleteDraftsCard" class="card hidden">
+    <h2>Incomplete Drafts</h2>
+    <p class="sub">Draft programs with no escort identity yet — TTL-eligible for cleanup 24h after creation.</p>
+    <button class="btn" onclick="loadIncompleteDrafts()">Refresh</button>
+    <div id="incompleteDraftsProgress" style="font-size:12.5px;color:var(--muted);margin:8px 0"></div>
+    <div id="incompleteDraftsHost"></div>
+  </div>
+
+  <div id="releaseSlipCard" class="card hidden">
+    <h2>Release-Slip Review</h2>
+    <p class="sub">OCR extractions awaiting admin review. Approval calls the same certified completion path as a [RELEASE CONFIRMED] WhatsApp message.</p>
+    <button class="btn" onclick="loadReleaseSlips()">Refresh Pending Slips</button>
+    <div id="releaseSlipProgress" style="font-size:12.5px;color:var(--muted);margin:8px 0"></div>
+    <div id="releaseSlipHost"></div>
+  </div>
+
+  <div id="completeCard" class="card hidden">
+    <h2>Manual Completion</h2>
+    <p class="sub">Admin/superadmin only. Reuses the same idempotent completion path [RELEASE CONFIRMED] messages use.</p>
+    <div class="filter-grid">
+      <div class="field"><label>Program ID</label><input id="cProgramId" type="number"></div>
+      <div class="field"><label>End Date</label><input id="cEndDate" type="date"></div>
+      <div class="field"><label>End Shift</label><select id="cEndShift"><option value="N">Night (N)</option><option value="D">Day (D)</option></select></div>
+      <div class="field"><label>Release Point (optional)</label><input id="cReleasePoint" type="text"></div>
+    </div>
+    <div class="field"><label>Reason (mandatory)</label><input id="cReason" type="text" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px"></div>
+    <button class="btn primary" onclick="submitManualCompletion()" style="margin-top:8px">Complete Program</button>
+    <div id="completeStatus" class="status"></div>
+  </div>
+</div>
+
+<script src="/static/shared-auth-fetch.js"></script>
+<script>
+let API_KEY = '';
+
+function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function doLogin() {
+  const key = document.getElementById('keyInput').value.trim();
+  if (!key) return;
+  API_KEY = key;
+  localStorage.setItem('fpe_api_key', key);
+  boot();
+}
+
+let CAN_ASSIGN = false;
+let CAN_ADMIN = false;
+
+async function boot() {
+  document.getElementById('loginBox').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+  const today = new Date().toISOString().slice(0, 10);
+  document.getElementById('fStartDate').value = today;
+  document.getElementById('fEndDate').value = today;
+  await resolveUserAccess();
+  loadAllWorkers();
+  loadOverlaps();
+  loadSameVesselQueue();
+  if (CAN_ADMIN) { loadIncompleteDrafts(); loadReleaseSlips(); }
+  wireEscortNameLookup();
+}
+
+// ── Escort Name typeahead (reuses /admin/attendance/lookup/suggest — the
+// wbom_employees-domain lookup, same auth as this page already uses) ──────
+let _escortSuggestItems = [];
+let _escortSuggestTimer = null;
+
+function wireEscortNameLookup() {
+  const input = document.getElementById('rEscortName');
+  if (!input || input._wired) return;
+  input._wired = true;
+  input.addEventListener('input', () => {
+    clearTimeout(_escortSuggestTimer);
+    const drop = document.getElementById('rEscortNameDrop');
+    const q = input.value.trim();
+    if (!q || q.length < 2) { if (drop) drop.classList.remove('open'); return; }
+    _escortSuggestTimer = setTimeout(async () => {
+      try {
+        const r = await FazleAuthFetch.fetch('/admin/attendance/lookup/suggest?q=' + encodeURIComponent(q) + '&limit=8', API_KEY);
+        if (!r.ok) return;
+        const data = await r.json();
+        _escortSuggestItems = data.results || [];
+        if (!drop) return;
+        drop.innerHTML = _escortSuggestItems.length
+          ? _escortSuggestItems.map((e, i) => `<div class="suggest-row" onmousedown="event.preventDefault();pickEscortSuggest(${i})">
+              <div class="name">${esc(e.employee_name || '')}</div>
+              <div class="meta">${esc(e.employee_mobile || e.employee_id_phone || '')}</div>
+            </div>`).join('')
+          : '<div class="suggest-row" style="color:var(--muted)">No matches — you can still type a new name</div>';
+        drop.classList.add('open');
+      } catch (_) { /* typeahead is a convenience; ignore errors silently */ }
+    }, 280);
+  });
+  input.addEventListener('blur', () => setTimeout(() => {
+    const drop = document.getElementById('rEscortNameDrop');
+    if (drop) drop.classList.remove('open');
+  }, 200));
+}
+
+function pickEscortSuggest(idx) {
+  const e = _escortSuggestItems[idx];
+  if (!e) return;
+  document.getElementById('rEscortName').value = e.employee_name || '';
+  if (!document.getElementById('rEscortMobile').value.trim()) {
+    document.getElementById('rEscortMobile').value = e.employee_mobile || e.employee_id_phone || '';
+  }
+  if (e.employee_id && !document.getElementById('rEmployeeId').value.trim()) {
+    document.getElementById('rEmployeeId').value = e.employee_id;
+  }
+  const drop = document.getElementById('rEscortNameDrop');
+  if (drop) drop.classList.remove('open');
+}
+
+// Reuses the exact same /api/admin/session mechanism payroll.html and
+// escort-roster.html already use to resolve role-based UI visibility --
+// not a new endpoint. operator/accountant/admin/superadmin/owner may
+// assign; viewer/office_assistant may not (Phase 2A.2 RBAC). Phase 2A.3
+// Stage 5/6 admin-only actions (manual completion, release-slip approval,
+// controlled override, conflict-pair review) use the stricter ADMIN_ROLES
+// set, matching modules.dispatch.routes._require_admin_or_above exactly.
+const ASSIGN_ROLES = ['operator', 'accountant', 'admin', 'superadmin', 'owner'];
+const ADMIN_ROLES = ['admin', 'superadmin', 'owner'];
+
+async function resolveUserAccess() {
+  CAN_ASSIGN = false;
+  CAN_ADMIN = false;
+  try {
+    const r = await FazleAuthFetch.fetch('/api/admin/session', API_KEY);
+    if (r.status === 403 || r.status === 401) return handleAuthFailure();
+    if (!r.ok) return;
+    const data = await r.json();
+    const roles = Array.isArray(data.user && data.user.normalized_roles) ? data.user.normalized_roles : [];
+    CAN_ASSIGN = roles.some(role => ASSIGN_ROLES.includes(String(role || '').toLowerCase()));
+    CAN_ADMIN = roles.some(role => ADMIN_ROLES.includes(String(role || '').toLowerCase()));
+  } catch (e) {
+    CAN_ASSIGN = false;
+    CAN_ADMIN = false;
+  }
+  document.getElementById('assignCard').classList.toggle('hidden', !CAN_ASSIGN);
+  document.getElementById('assignBanner').classList.toggle('hidden', !CAN_ASSIGN);
+  document.getElementById('replaceCard').classList.toggle('hidden', !CAN_ASSIGN);
+  document.getElementById('unassignCard').classList.toggle('hidden', !CAN_ASSIGN);
+  document.getElementById('incompleteDraftsCard').classList.toggle('hidden', !CAN_ADMIN);
+  document.getElementById('releaseSlipCard').classList.toggle('hidden', !CAN_ADMIN);
+  document.getElementById('completeCard').classList.toggle('hidden', !CAN_ADMIN);
+}
+
+function handleAuthFailure() {
+  localStorage.removeItem('fpe_api_key');
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('loginBox').style.display = 'block';
+  document.getElementById('loginErr').textContent = 'Unauthorized — the API key was rejected. Log in again.';
+}
+
+function renderConflict(c) {
+  if (!c) return '—';
+  return `<details class="conflict-detail"><summary>Program #${esc(c.program_id)} (${esc(c.status)})</summary>
+    <div>Vessel: ${esc(c.mother_vessel || '—')}</div>
+    <div>Window: ${esc(c.start_date)} ${esc(c.start_shift)} → ${esc(c.end_date || 'open')} ${esc(c.end_shift || '')}</div>
+    <div>Destination: ${esc(c.destination || '—')}</div>
+  </details>`;
+}
+
+function renderWorkersTable(items) {
+  const host = document.getElementById('tableHost');
+  if (!items.length) {
+    host.innerHTML = '<div class="empty">No escort workers match this query.</div>';
+    return;
+  }
+  host.innerHTML = `<table>
+    <thead><tr><th>ID</th><th>Name</th><th>Mobile</th><th>Available</th><th>Current Assignment</th><th>Last Assignment</th><th>Active Count</th></tr></thead>
+    <tbody>${items.map(i => `
+      <tr class="${i.available === true ? 'available' : ''}">
+        <td class="mono">#${esc(i.employee_id)}</td>
+        <td>${esc(i.employee_name)}</td>
+        <td class="mono">${esc(i.employee_mobile || '—')}</td>
+        <td>${i.available === true
+              ? '<span class="pill ok">Available</span>'
+              : i.available === false
+                ? '<span class="pill err">Unavailable</span>'
+                : '<span class="pill warn">Unknown</span>'}</td>
+        <td>${renderConflict(i.current_conflict)}</td>
+        <td>${esc(i.last_assignment_date || 'never')}</td>
+        <td>${esc(i.active_assignment_count)}</td>
+      </tr>`).join('')}</tbody>
+  </table>`;
+}
+
+async function loadAllWorkers() {
+  const progress = document.getElementById('progress');
+  progress.textContent = 'Loading…';
+  try {
+    const empId = document.getElementById('fEmployeeId').value.trim();
+    const path = '/api/dispatch/availability' + (empId ? `?employee_id=${encodeURIComponent(empId)}` : '');
+    const r = await FazleAuthFetch.fetch(path, API_KEY);
+    if (r.status === 403) return handleAuthFailure();
+    if (!r.ok) { progress.innerHTML = `<span style="color:var(--err)">${esc(await FazleAuthFetch.readError(r))}</span>`; return; }
+    const data = await r.json();
+    progress.innerHTML = `<b>${data.total}</b> active escort worker(s) — page ${data.page} of ${data.pages || 1}`;
+    renderWorkersTable(data.items);
+  } catch (e) {
+    progress.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
+  }
+}
+
+async function checkAvailability() {
+  const status = document.getElementById('filterStatus');
+  const startDate = document.getElementById('fStartDate').value;
+  const startShift = document.getElementById('fStartShift').value;
+  const endDate = document.getElementById('fEndDate').value;
+  const endShift = document.getElementById('fEndShift').value;
+  const destination = document.getElementById('fDestination').value.trim();
+  if (!startDate || !endDate) { status.innerHTML = '<span style="color:var(--err)">Start and end date are required.</span>'; return; }
+  status.textContent = 'Checking…';
+  status.className = 'status';
+
+  const empId = document.getElementById('fEmployeeId').value.trim();
+  if (empId) {
+    try {
+      const r = await FazleAuthFetch.fetch('/api/dispatch/check-conflict', API_KEY, {
+        method: 'POST',
+        body: JSON.stringify({
+          escort_employee_id: Number(empId),
+          start_date: startDate, start_shift: startShift,
+          end_date: endDate, end_shift: endShift,
+        }),
+      });
+      if (r.status === 403) return handleAuthFailure();
+      if (!r.ok) { status.innerHTML = `<span style="color:var(--err)">${esc(await FazleAuthFetch.readError(r))}</span>`; return; }
+      const d = await r.json();
+      status.innerHTML = d.available === true
+        ? '<span style="color:var(--ok)">✓ Available for this window</span>'
+        : d.available === false
+          ? `<span style="color:var(--err)">✗ Unavailable — ${esc(d.conflicts.length)} conflict(s)</span>`
+          : '<span style="color:var(--warn)">⚠ Availability unknown (data quality)</span>';
+      renderWorkersTable([{
+        employee_id: d.escort_employee_id, employee_name: '(queried employee)', employee_mobile: '',
+        available: d.available, current_conflict: d.conflicts[0] || null,
+        last_assignment_date: null, active_assignment_count: d.conflicts.length,
+      }]);
+    } catch (e) {
+      status.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
+    }
+  } else {
+    status.textContent = '';
+    await loadAllWorkers();
+  }
+  await loadSuggestions(startDate, startShift, endDate, endShift, destination);
+}
+
+async function loadSuggestions(startDate, startShift, endDate, endShift, destination) {
+  const host = document.getElementById('suggestionsHost');
+  host.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    let path = `/api/dispatch/suggestions?start_date=${startDate}&start_shift=${startShift}&end_date=${endDate}&end_shift=${endShift}`;
+    if (destination) path += `&destination=${encodeURIComponent(destination)}`;
+    const r = await FazleAuthFetch.fetch(path, API_KEY);
+    if (r.status === 403) return handleAuthFailure();
+    if (!r.ok) { host.innerHTML = `<div class="empty" style="color:var(--err)">${esc(await FazleAuthFetch.readError(r))}</div>`; return; }
+    const data = await r.json();
+    if (!data.items.length) { host.innerHTML = '<div class="empty">No eligible, available workers found for this window.</div>'; return; }
+    host.innerHTML = data.items.map(s => `
+      <div class="suggestion-row" style="padding:8px 0;border-bottom:1px solid var(--border)" onclick="fillSuggestion(${esc(s.employee_id)})">
+        <span class="rank-badge">${esc(s.rank)}</span>
+        <b>${esc(s.employee_name)}</b> <span class="mono">#${esc(s.employee_id)}</span>
+        <div class="reasons">${s.reasons.map(esc).join(' · ')}</div>
+      </div>`).join('');
+  } catch (e) {
+    host.innerHTML = `<div class="empty" style="color:var(--err)">Network error: ${esc(e.message)}</div>`;
+  }
+}
+
+// Fills the Assign section's employee field only -- never submits anything.
+// The operator still must click Load Program, review, then explicitly confirm.
+function fillSuggestion(employeeId) {
+  if (!CAN_ASSIGN) return;
+  document.getElementById('aEmployeeId').value = employeeId;
+  document.getElementById('assignCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// ── Phase 2A.2: controlled manual assignment ────────────────────────────────
+
+let PENDING_ASSIGN = null; // { programId, employeeId, expectedCurrentEmployeeId, programDetail }
+
+async function loadProgramForAssign() {
+  const status = document.getElementById('assignStatus');
+  const programHost = document.getElementById('programHost');
+  const confirmHost = document.getElementById('confirmHost');
+  confirmHost.innerHTML = '';
+  PENDING_ASSIGN = null;
+
+  const programId = document.getElementById('aProgramId').value.trim();
+  const employeeId = document.getElementById('aEmployeeId').value.trim();
+  if (!programId || !employeeId) {
+    status.innerHTML = '<span style="color:var(--err)">Program ID and Escort Employee ID are both required.</span>';
+    return;
+  }
+  status.textContent = 'Loading…';
+  programHost.innerHTML = '';
+  try {
+    const r = await FazleAuthFetch.fetch(`/api/escort-roster/${encodeURIComponent(programId)}`, API_KEY);
+    if (r.status === 403) return handleAuthFailure();
+    if (r.status === 404) { status.innerHTML = `<span style="color:var(--err)">Program #${esc(programId)} not found.</span>`; return; }
+    if (!r.ok) { status.innerHTML = `<span style="color:var(--err)">${esc(await FazleAuthFetch.readError(r))}</span>`; return; }
+    const p = await r.json();
+    status.textContent = '';
+    const currentEmpId = p.escort_employee_id ?? null;
+    programHost.innerHTML = `
+      <dl class="confirm-box" style="border-color:var(--border);background:var(--surface)">
+        <dt>Program</dt><dd>#${esc(p.program_id)} — ${esc(p.mother_vessel || '—')} / ${esc(p.lighter_vessel || '—')}</dd>
+        <dt>Status</dt><dd>${esc(p.program_status || p.roster_status || '—')}</dd>
+        <dt>Window</dt><dd>${esc(p.start_date || '—')} ${esc(p.start_shift || '')} → ${esc(p.end_date || 'open')} ${esc(p.end_shift || '')}</dd>
+        <dt>Destination</dt><dd>${esc(p.destination || '—')}</dd>
+        <dt>Current escort</dt><dd>${currentEmpId ? ('#' + esc(currentEmpId) + ' ' + esc(p.escort_name || '')) : '(unassigned)'}</dd>
+      </dl>`;
+    PENDING_ASSIGN = {
+      programId: Number(programId), employeeId: Number(employeeId),
+      expectedCurrentEmployeeId: currentEmpId, programDetail: p,
+    };
+    await previewConflictAndConfirm();
+  } catch (e) {
+    status.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
+  }
+}
+
+async function previewConflictAndConfirm() {
+  if (!PENDING_ASSIGN) return;
+  const confirmHost = document.getElementById('confirmHost');
+  const p = PENDING_ASSIGN.programDetail;
+  confirmHost.innerHTML = '<div class="empty">Checking conflicts…</div>';
+  let conflictHtml = '';
+  try {
+    if (p.start_date && p.end_date) {
+      const r = await FazleAuthFetch.fetch('/api/dispatch/check-conflict', API_KEY, {
+        method: 'POST',
+        body: JSON.stringify({
+          escort_employee_id: PENDING_ASSIGN.employeeId,
+          start_date: p.start_date, start_shift: p.start_shift || 'D',
+          end_date: p.end_date, end_shift: p.end_shift || 'N',
+          exclude_program_id: PENDING_ASSIGN.programId,
+        }),
+      });
+      if (r.ok) {
+        const d = await r.json();
+        PENDING_ASSIGN.conflicts = d.conflicts || [];
+        conflictHtml = d.available === true
+          ? '<span style="color:var(--ok)">✓ No conflict detected for this employee/window</span>'
+          : d.available === false
+            ? `<span style="color:var(--err)">✗ Conflict detected — ${esc((d.conflicts || []).length)} overlapping program(s). Submitting will be rejected (409) unless this changes.</span>`
+            : '<span style="color:var(--warn)">⚠ Availability unknown (data quality) — backend will still re-check before writing.</span>';
+      } else {
+        conflictHtml = '<span style="color:var(--warn)">⚠ Could not preview conflict client-side — the backend still re-checks before writing.</span>';
+      }
+    } else {
+      conflictHtml = '<span style="color:var(--warn)">⚠ Program has no end date on record (open-ended) — preview skipped; the backend still re-checks before writing.</span>';
+    }
+  } catch (e) {
+    conflictHtml = '<span style="color:var(--warn)">⚠ Conflict preview failed — the backend still re-checks before writing.</span>';
+  }
+
+  const action = PENDING_ASSIGN.expectedCurrentEmployeeId ? 'Reassign' : 'Assign';
+  const hasConflict = (PENDING_ASSIGN.conflicts || []).length > 0;
+  const overrideBlock = (hasConflict && CAN_ADMIN) ? `
+      <div style="margin-top:10px;border-top:1px dashed var(--border);padding-top:10px">
+        <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600">
+          <input type="checkbox" id="aOverrideCheck" onchange="document.getElementById('aOverrideReasonRow').classList.toggle('hidden', !this.checked)">
+          Override this conflict (admin only)
+        </label>
+        <div id="aOverrideReasonRow" class="hidden field" style="margin-top:6px">
+          <label>Override reason (mandatory)</label>
+          <input id="aOverrideReason" type="text" placeholder="e.g. Owner-approved double booking for urgent job">
+        </div>
+      </div>` : '';
+  confirmHost.innerHTML = `
+    <div class="confirm-box">
+      <b>Confirm ${esc(action)}</b>
+      <dl>
+        <dt>Program</dt><dd>#${esc(PENDING_ASSIGN.programId)} — ${esc(p.mother_vessel || '—')}</dd>
+        <dt>Current escort</dt><dd>${PENDING_ASSIGN.expectedCurrentEmployeeId ? ('#' + esc(PENDING_ASSIGN.expectedCurrentEmployeeId)) : '(unassigned)'}</dd>
+        <dt>New escort</dt><dd>#${esc(PENDING_ASSIGN.employeeId)}</dd>
+        <dt>Window</dt><dd>${esc(p.start_date || '—')} ${esc(p.start_shift || '')} → ${esc(p.end_date || 'open')} ${esc(p.end_shift || '')}</dd>
+        <dt>Destination</dt><dd>${esc(p.destination || '—')}</dd>
+        <dt>Conflict check</dt><dd>${conflictHtml}</dd>
+      </dl>
+      ${overrideBlock}
+      <button class="btn primary" onclick="submitAssignment()">Confirm ${esc(action)}</button>
+      <button class="btn" onclick="cancelAssign()">Cancel</button>
+    </div>`;
+}
+
+function cancelAssign() {
+  PENDING_ASSIGN = null;
+  document.getElementById('confirmHost').innerHTML = '';
+}
+
+async function submitAssignment() {
+  if (!PENDING_ASSIGN) return;
+  const status = document.getElementById('assignStatus');
+  const confirmHost = document.getElementById('confirmHost');
+  status.textContent = 'Submitting…';
+  status.className = 'status';
+  const overrideCheck = document.getElementById('aOverrideCheck');
+  const isOverride = !!(overrideCheck && overrideCheck.checked);
+  try {
+    let path = `/api/dispatch/programs/${PENDING_ASSIGN.programId}/assign`;
+    let payload = {
+      escort_employee_id: PENDING_ASSIGN.employeeId,
+      expected_current_employee_id: PENDING_ASSIGN.expectedCurrentEmployeeId,
+    };
+    if (isOverride) {
+      const reason = (document.getElementById('aOverrideReason').value || '').trim();
+      if (!reason) {
+        status.innerHTML = '<span style="color:var(--err)">An override reason is required.</span>';
+        return;
+      }
+      path = `/api/dispatch/programs/${PENDING_ASSIGN.programId}/assign-override`;
+      payload.override_reason = reason;
+      payload.acknowledged_conflict_program_ids = (PENDING_ASSIGN.conflicts || []).map(c => c.program_id);
+    }
+    const r = await FazleAuthFetch.fetch(path, API_KEY, { method: 'POST', body: JSON.stringify(payload) });
+    if (r.status === 403) return handleAuthFailure();
+    const body = await r.json().catch(() => ({}));
+    if (r.status === 409) {
+      const detail = body.detail && typeof body.detail === 'object' ? body.detail : body;
+      const code = detail.code || 'conflict';
+      const msg = code === 'stale_assignment'
+        ? 'Stale assignment — the program changed since it was loaded. Reloading current state…'
+        : `Conflict — ${esc(detail.detail || 'overlapping assignment')} (${esc((detail.conflicts || []).length)} conflict(s))`;
+      confirmHost.innerHTML = '';
+      await loadProgramForAssign(); // refresh program state per spec, no page reload
+      status.innerHTML = `<span style="color:var(--err)">${msg}</span>`; // restore after refresh (which resets status text)
+      return;
+    }
+    if (r.status === 404) {
+      status.innerHTML = `<span style="color:var(--err)">${esc((body.detail && body.detail.detail) || body.detail || 'not found')}</span>`;
+      return;
+    }
+    if (r.status === 422) {
+      status.innerHTML = `<span style="color:var(--err)">Validation error: ${esc((body.detail && body.detail.detail) || body.detail)}</span>`;
+      return;
+    }
+    if (!r.ok) {
+      status.innerHTML = `<span style="color:var(--err)">Error (${r.status}): ${esc((body.detail && body.detail.detail) || body.detail || 'unknown error')}</span>`;
+      return;
+    }
+    const successMsg = `<span style="color:var(--ok)">✓ Assignment succeeded — program #${esc(body.program_id)} now assigned to #${esc(body.new_employee_id)} (${esc(body.employee_name || '')})</span>`;
+    confirmHost.innerHTML = '';
+    PENDING_ASSIGN = null;
+    // Refresh program state, availability, suggestions, and overlap count --
+    // no page reload, per spec. Each of these touches its own status/progress
+    // element, not #assignStatus, except loadProgramForAssign() which does --
+    // restore the success message afterward so it isn't silently wiped.
+    await loadProgramForAssign();
+    await loadAllWorkers();
+    await loadOverlaps();
+    const sd = document.getElementById('fStartDate').value, ss = document.getElementById('fStartShift').value;
+    const ed = document.getElementById('fEndDate').value, es = document.getElementById('fEndShift').value;
+    if (sd && ed) await loadSuggestions(sd, ss, ed, es, document.getElementById('fDestination').value.trim());
+    status.innerHTML = successMsg;
+  } catch (e) {
+    status.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
+  }
+}
+
+// ── Phase 2A.2: read-only existing-overlap review ───────────────────────────
+
+async function loadOverlaps() {
+  const progress = document.getElementById('overlapsProgress');
+  const host = document.getElementById('overlapsHost');
+  progress.textContent = 'Loading…';
+  try {
+    const r = await FazleAuthFetch.fetch('/api/dispatch/overlaps', API_KEY);
+    if (r.status === 403) return handleAuthFailure();
+    if (!r.ok) { progress.innerHTML = `<span style="color:var(--err)">${esc(await FazleAuthFetch.readError(r))}</span>`; return; }
+    const data = await r.json();
+    progress.textContent = `${data.total} employee(s) with overlapping assignments — page ${data.page} of ${data.pages || 1}`;
+    if (!data.items.length) { host.innerHTML = '<div class="empty">No overlaps found.</div>'; return; }
+    host.innerHTML = data.items.map(g => `
+      <div class="overlap-group">
+        <b>${esc(g.employee_name || '(unnamed)')}</b> <span class="mono">#${esc(g.employee_id)}</span>
+        — ${esc(g.programs.length)} program(s), ${esc(g.conflict_count)} conflicting pair(s)
+        ${g.data_quality_warnings ? `<span class="pill warn">data quality: ${esc(g.data_quality_warnings.length)} issue(s)</span>` : ''}
+        <div style="margin-top:6px">
+          ${g.programs.map(p => `<div style="font-size:12px">#${esc(p.program_id)} ${esc(p.status)} — ${esc(p.mother_vessel || '—')} ${esc(p.start_date)} ${esc(p.start_shift || '')} → ${esc(p.end_date || 'open')} ${esc(p.end_shift || '')} ${esc(p.destination ? '(' + p.destination + ')' : '')}</div>`).join('')}
+        </div>
+        <div style="margin-top:6px">
+          ${g.conflicting_pairs.map(pr => `
+            <div class="overlap-pair">
+              ⚠ #${esc(pr.program_a.program_id)} ↔ #${esc(pr.program_b.program_id)} — <span class="pill err">${esc(pr.classification)}</span>
+              ${pr.authorized_override ? '<span class="pill warn">authorized override</span>' : ''}
+              ${pr.review ? `<span class="pill ok">reviewed: ${esc(pr.review.decision)} by ${esc(pr.review.performed_by)}</span>` : ''}
+              ${CAN_ADMIN && !pr.review ? `
+                <button class="btn" style="padding:3px 8px;font-size:11px" onclick="promptConflictReview(${esc(pr.program_a.program_id)},${esc(pr.program_b.program_id)},'keep_both_authorized')">Keep Both</button>
+                <button class="btn" style="padding:3px 8px;font-size:11px" onclick="promptConflictReview(${esc(pr.program_a.program_id)},${esc(pr.program_b.program_id)},'defer_for_investigation')">Defer</button>` : ''}
+            </div>`).join('')}
+        </div>
+      </div>`).join('');
+  } catch (e) {
+    progress.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
+  }
+}
+
+// ── Phase 2A.3 Stage 6: conflict-pair review (Decision 5) ───────────────────
+
+async function promptConflictReview(programIdA, programIdB, decision) {
+  const note = window.prompt(
+    decision === 'keep_both_authorized'
+      ? 'Note for keeping both as an authorized overlap (mandatory):'
+      : 'Note for deferring this pair for investigation (mandatory):');
+  if (note === null) return;
+  if (!note.trim()) { alert('A note is required.'); return; }
+  const progress = document.getElementById('overlapsProgress');
+  try {
+    const r = await FazleAuthFetch.fetch('/api/dispatch/overlaps/review', API_KEY, {
+      method: 'POST',
+      body: JSON.stringify({ program_id_a: programIdA, program_id_b: programIdB, decision, note: note.trim() }),
+    });
+    if (r.status === 403) return handleAuthFailure();
+    if (!r.ok) { progress.innerHTML = `<span style="color:var(--err)">${esc(await FazleAuthFetch.readError(r))}</span>`; return; }
+    await loadOverlaps();
+  } catch (e) {
+    progress.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
+  }
+}
+
+// ── Phase 2A.3 Stage 6: read-only same-vessel review queue ──────────────────
+
+const SAME_VESSEL_CATEGORIES = [
+  ['under_seven_day', 'Under 7 Days (escort_changed candidate)'],
+  ['seven_plus_day', 'Seven+ Days (completed candidate)'],
+  ['same_date_historical', 'Same-Date (historical correction)'],
+  ['insufficient_data', 'Insufficient Data (empty lighter vessel)'],
+  ['bulk_import_artifact', 'Bulk-Import Artifact (likely duplicate, not a real change)'],
+];
+
+async function loadSameVesselQueue() {
+  const progress = document.getElementById('sameVesselProgress');
+  const host = document.getElementById('sameVesselHost');
+  progress.textContent = 'Loading…';
+  try {
+    const r = await FazleAuthFetch.fetch('/api/dispatch/same-vessel-review', API_KEY);
+    if (r.status === 403) return handleAuthFailure();
+    if (!r.ok) { progress.innerHTML = `<span style="color:var(--err)">${esc(await FazleAuthFetch.readError(r))}</span>`; return; }
+    const data = await r.json();
+    const total = SAME_VESSEL_CATEGORIES.reduce((sum, [key]) => sum + (data[key] || []).length, 0);
+    progress.textContent = `${total} candidate(s) across ${SAME_VESSEL_CATEGORIES.length} categories. ${esc(data.note || '')}`;
+    if (!total) { host.innerHTML = '<div class="empty">No same-vessel review candidates found.</div>'; return; }
+    host.innerHTML = SAME_VESSEL_CATEGORIES.map(([key, label]) => {
+      const items = data[key] || [];
+      if (!items.length) return '';
+      return `<div class="overlap-group"><b>${esc(label)}</b> — ${esc(items.length)} candidate(s)
+        <div style="margin-top:6px">
+          ${items.map(c => `<div style="font-size:12px;margin:3px 0">
+            #${esc(c.program_id_earlier)} → #${esc(c.program_id_later)} — ${esc(c.mother_vessel || '—')} / ${esc(c.lighter_vessel || '—')}
+            ${c.escort_earlier ? `(${esc(c.escort_earlier.name || '—')} → ${esc(c.escort_later.name || '—')})` : ''}
+            <span class="reasons">${esc(c.reason)}</span>
+          </div>`).join('')}
+        </div>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    progress.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
+  }
+}
+
+// ── Phase 2A.3 Stage 3 manual trigger: replace escort ────────────────────────
+
+async function submitReplaceEscort() {
+  const status = document.getElementById('replaceStatus');
+  const programId = document.getElementById('rProgramId').value.trim();
+  if (!programId) { status.innerHTML = '<span style="color:var(--err)">Earlier Program ID is required.</span>'; return; }
+  status.textContent = 'Submitting…';
+  try {
+    const employeeIdRaw = document.getElementById('rEmployeeId').value.trim();
+    const r = await FazleAuthFetch.fetch(`/api/dispatch/programs/${encodeURIComponent(programId)}/replace-escort`, API_KEY, {
+      method: 'POST',
+      body: JSON.stringify({
+        mother_vessel: document.getElementById('rMotherVessel').value.trim(),
+        lighter_vessel: document.getElementById('rLighterVessel').value.trim(),
+        escort_employee_id: employeeIdRaw ? Number(employeeIdRaw) : null,
+        escort_name: document.getElementById('rEscortName').value.trim(),
+        escort_mobile: document.getElementById('rEscortMobile').value.trim(),
+        start_date: document.getElementById('rStartDate').value,
+        start_shift: document.getElementById('rStartShift').value,
+      }),
+    });
+    if (r.status === 403) return handleAuthFailure();
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      status.innerHTML = `<span style="color:var(--err)">${esc((body.detail && body.detail.detail) || body.detail || 'error')}</span>`;
+      return;
+    }
+    status.innerHTML = `<span style="color:var(--ok)">✓ Replacement segment created — new program #${esc(body.new_program_id)}, earlier program #${esc(body.earlier_program_id)} set to ${esc(body.earlier_status)}</span>`;
+    await loadOverlaps();
+    await loadSameVesselQueue();
+  } catch (e) {
+    status.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
+  }
+}
+
+// ── Phase 2A.3 Stage 4: safe unassignment ────────────────────────────────────
+
+async function submitUnassign() {
+  const status = document.getElementById('unassignStatus');
+  const programId = document.getElementById('uProgramId').value.trim();
+  const employeeId = document.getElementById('uEmployeeId').value.trim();
+  const reason = document.getElementById('uReason').value.trim();
+  if (!programId || !employeeId || !reason) {
+    status.innerHTML = '<span style="color:var(--err)">Program ID, Expected Current Employee ID, and Reason are all required.</span>';
+    return;
+  }
+  status.textContent = 'Submitting…';
+  try {
+    const r = await FazleAuthFetch.fetch(`/api/dispatch/programs/${encodeURIComponent(programId)}/unassign`, API_KEY, {
+      method: 'POST',
+      body: JSON.stringify({ expected_current_employee_id: Number(employeeId), reason }),
+    });
+    if (r.status === 403) return handleAuthFailure();
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      status.innerHTML = `<span style="color:var(--err)">${esc((body.detail && body.detail.detail) || body.detail || 'error')}</span>`;
+      return;
+    }
+    status.innerHTML = `<span style="color:var(--ok)">✓ Unassigned — program #${esc(body.program_id)} is now unassigned</span>`;
+    await loadAllWorkers();
+    await loadOverlaps();
+  } catch (e) {
+    status.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
+  }
+}
+
+// ── Phase 2A.3 Stage 5: incomplete drafts (read-only) ────────────────────────
+
+async function loadIncompleteDrafts() {
+  const progress = document.getElementById('incompleteDraftsProgress');
+  const host = document.getElementById('incompleteDraftsHost');
+  progress.textContent = 'Loading…';
+  try {
+    const r = await FazleAuthFetch.fetch('/api/dispatch/incomplete-drafts', API_KEY);
+    if (r.status === 403) return handleAuthFailure();
+    if (!r.ok) { progress.innerHTML = `<span style="color:var(--err)">${esc(await FazleAuthFetch.readError(r))}</span>`; return; }
+    const data = await r.json();
+    progress.textContent = `${data.total} incomplete draft(s)`;
+    if (!data.items.length) { host.innerHTML = '<div class="empty">No incomplete drafts.</div>'; return; }
+    host.innerHTML = `<table><thead><tr><th>Program</th><th>Vessel</th><th>Age (h)</th></tr></thead><tbody>
+      ${data.items.map(i => `<tr><td class="mono">#${esc(i.program_id)}</td><td>${esc(i.mother_vessel || '—')} / ${esc(i.lighter_vessel || '—')}</td><td>${esc(i.age_hours)}</td></tr>`).join('')}
+    </tbody></table>`;
+  } catch (e) {
+    progress.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
+  }
+}
+
+// ── Phase 2A.3 Stage 5: release-slip review ──────────────────────────────────
+
+async function loadReleaseSlips() {
+  const progress = document.getElementById('releaseSlipProgress');
+  const host = document.getElementById('releaseSlipHost');
+  progress.textContent = 'Loading…';
+  try {
+    const r = await FazleAuthFetch.fetch('/api/dispatch/release-slips/pending', API_KEY);
+    if (r.status === 403) return handleAuthFailure();
+    if (!r.ok) { progress.innerHTML = `<span style="color:var(--err)">${esc(await FazleAuthFetch.readError(r))}</span>`; return; }
+    const data = await r.json();
+    progress.textContent = `${data.total} pending release slip(s)`;
+    if (!data.items.length) { host.innerHTML = '<div class="empty">No pending release slips.</div>'; return; }
+    host.innerHTML = data.items.map(s => `
+      <div class="overlap-group" id="slip-${esc(s.id)}">
+        <b>Extraction #${esc(s.id)}</b> — ${esc(s.mother_vessel || '—')} / ${esc(s.lighter_vessel || '—')}
+        — escort ${esc(s.escort_name || '—')} — confidence ${esc(s.confidence ?? '—')}
+        <div style="margin-top:6px">
+          <button class="btn" onclick="loadSlipCandidates(${esc(s.id)})">Show Candidate Programs</button>
+        </div>
+        <div id="slip-candidates-${esc(s.id)}" style="margin-top:6px"></div>
+      </div>`).join('');
+  } catch (e) {
+    progress.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
+  }
+}
+
+async function loadSlipCandidates(extractionId) {
+  const host = document.getElementById(`slip-candidates-${extractionId}`);
+  host.innerHTML = 'Loading candidates…';
+  try {
+    const r = await FazleAuthFetch.fetch(`/api/dispatch/release-slips/${extractionId}/candidates`, API_KEY);
+    if (r.status === 403) return handleAuthFailure();
+    if (!r.ok) { host.innerHTML = `<span style="color:var(--err)">${esc(await FazleAuthFetch.readError(r))}</span>`; return; }
+    const data = await r.json();
+    if (!data.candidates.length) { host.innerHTML = '<div class="empty">No candidate programs found.</div>'; return; }
+    host.innerHTML = data.candidates.map(c => `
+      <div style="font-size:12px;margin:4px 0;padding:6px;border:1px solid var(--border);border-radius:6px">
+        #${esc(c.program_id)} — ${esc(c.mother_vessel || '—')} / ${esc(c.lighter_vessel || '—')} — confidence ${esc(c.confidence)}
+        <button class="btn" style="padding:3px 8px;font-size:11px;margin-left:6px" onclick="approveReleaseSlip(${esc(extractionId)}, ${esc(c.program_id)})">Approve</button>
+      </div>`).join('');
+  } catch (e) {
+    host.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
+  }
+}
+
+async function approveReleaseSlip(extractionId, programId) {
+  const endShift = window.prompt('End shift for this release (D or N)?', 'D');
+  if (!endShift) return;
+  const host = document.getElementById(`slip-candidates-${extractionId}`);
+  try {
+    const r = await FazleAuthFetch.fetch(`/api/dispatch/release-slips/${extractionId}/approve`, API_KEY, {
+      method: 'POST',
+      body: JSON.stringify({ program_id: programId, end_shift: endShift }),
+    });
+    if (r.status === 403) return handleAuthFailure();
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      host.innerHTML = `<span style="color:var(--err)">${esc((body.detail && body.detail.detail) || body.detail || 'error')}</span>`;
+      return;
+    }
+    host.innerHTML = `<span style="color:var(--ok)">✓ Approved — program #${esc(body.program_id)} completed on ${esc(body.end_date)}</span>`;
+    await loadReleaseSlips();
+    await loadAllWorkers();
+  } catch (e) {
+    host.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
+  }
+}
+
+// ── Phase 2A.3 Stage 5: manual completion ────────────────────────────────────
+
+async function submitManualCompletion() {
+  const status = document.getElementById('completeStatus');
+  const programId = document.getElementById('cProgramId').value.trim();
+  const endDate = document.getElementById('cEndDate').value;
+  const endShift = document.getElementById('cEndShift').value;
+  const reason = document.getElementById('cReason').value.trim();
+  if (!programId || !endDate || !reason) {
+    status.innerHTML = '<span style="color:var(--err)">Program ID, End Date, and Reason are all required.</span>';
+    return;
+  }
+  status.textContent = 'Submitting…';
+  try {
+    const r = await FazleAuthFetch.fetch(`/api/dispatch/programs/${encodeURIComponent(programId)}/complete`, API_KEY, {
+      method: 'POST',
+      body: JSON.stringify({
+        end_date: endDate, end_shift: endShift,
+        release_point: document.getElementById('cReleasePoint').value.trim() || null,
+        reason,
+      }),
+    });
+    if (r.status === 403) return handleAuthFailure();
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      status.innerHTML = `<span style="color:var(--err)">${esc((body.detail && body.detail.detail) || body.detail || 'error')}</span>`;
+      return;
+    }
+    status.innerHTML = `<span style="color:var(--ok)">✓ Program #${esc(body.program_id)} completed on ${esc(body.end_date)}</span>`;
+    await loadAllWorkers();
+    await loadOverlaps();
+    await loadIncompleteDrafts();
+  } catch (e) {
+    status.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
+  }
+}
+
+(function () {
+  const saved = localStorage.getItem('fpe_api_key');
+  if (saved) {
+    API_KEY = saved;
+    boot();
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+[run]
+source = app,modules
+omit =
+    */migrations/*
+    */tests/*
+    app/static/*
+    */logging_setup.py
+    */critical_numbers.py
+    */__pycache__/*
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise NotImplementedError
+    if TYPE_CHECKING:
+    @abstractmethod
+    pass
+
+[html]
+directory = tests/coverage_html

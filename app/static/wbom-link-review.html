@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WBOM Link Review — one-time cleanup tool</title>
+<style>
+:root{--bg:#fff8f5;--card:#fff;--accent:#FD3101;--accent2:#db2800;--err:#dc2626;--warn:#d97706;--ok:#16a34a;--muted:#64748b;--border:#e2e8f0;--surface:#f8fafc;--text:#1e293b}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Georgia,serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5;padding:20px}
+h1{color:var(--accent);font-size:20px;margin-bottom:4px}
+p.sub{color:var(--muted);font-size:13px;margin-bottom:16px}
+.pagelinks{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:10px}
+.pagelinks a{color:var(--accent2);text-decoration:none;font-size:12px}
+.pagelinks a:hover{text-decoration:underline}
+#loginBox{max-width:420px;margin:60px auto;background:#fff;padding:28px;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.12)}
+#loginBox input{width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:8px;font-size:14px;margin-bottom:10px}
+#loginBox button{width:100%;padding:10px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer}
+#app{display:none;max-width:1100px;margin:0 auto}
+#tableHost{overflow-x:auto}
+table{width:100%;min-width:600px;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.07)}
+th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--border);font-size:13px}
+th{background:var(--surface);color:var(--muted);text-transform:uppercase;font-size:11px;letter-spacing:.5px}
+tr.mismatch{background:#fff7ed}
+tr.done{opacity:.5}
+tr.skipped{opacity:.4;text-decoration:line-through}
+.pair{display:flex;flex-direction:column;gap:2px}
+.pair .fpe{color:var(--accent2);font-weight:600}
+.pair .wbom{color:var(--muted)}
+.warn-badge{display:inline-block;background:#fef3c7;color:#92400e;font-size:10px;padding:2px 6px;border-radius:6px;margin-left:6px}
+.btn{padding:6px 12px;border-radius:6px;border:1px solid var(--border);background:#fff;cursor:pointer;font-size:12px;margin-right:6px}
+.btn.link{background:var(--ok);color:#fff;border-color:var(--ok)}
+.btn.skip{background:var(--surface);color:var(--muted)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.status{font-size:12px;margin-top:3px}
+.status.ok{color:var(--ok)}
+.status.err{color:var(--err)}
+@media(max-width:480px){
+  body{padding:12px}
+  .btn{min-height:40px;padding:8px 12px}
+}
+</style>
+</head>
+<body>
+
+<div id="loginBox">
+  <h1>WBOM Link Review</h1>
+  <p class="sub">One-time cleanup tool. Requires the same admin key as /payroll.</p>
+  <input id="keyInput" type="password" placeholder="API Key">
+  <button onclick="doLogin()">Continue</button>
+  <div id="loginErr" style="color:var(--err);font-size:12px;margin-top:6px"></div>
+</div>
+
+<div id="app">
+  <h1>WBOM Link Review</h1>
+  <div class="pagelinks">
+    <a href="/">Dashboard</a>
+    <a href="/payroll">Payroll</a>
+    <a href="/escort-roster">Escort Roster</a>
+    <a href="/dispatch">Dispatch</a>
+    <a href="/unmatched-confirmations">Unmatched Confirmations</a>
+    <a href="/drafts">Drafts</a>
+    <a href="/kb">KB</a>
+    <a href="/open-chat">Open Chat</a>
+    <a href="/wa-chat">WA Chat</a>
+    <a href="/wbom-create-link">WBOM Create Link</a>
+  </div>
+  <p class="sub">Phone-matched FPE ↔ WBOM employee records with no existing link (live from <code>GET /reports/unresolved_fpe_employees</code>, category <code>wbom_match_unlinked</code>). Review each pair, then click Link or Skip. Nothing is changed until you click Link on that specific row — no bulk action exists on this page.</p>
+  <div id="progress" style="font-size:13px;color:var(--muted);margin-bottom:14px;background:#fff;padding:10px 14px;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.07);display:flex;justify-content:space-between;align-items:center;gap:10px"></div>
+  <div id="tableHost">
+  <table>
+    <thead><tr><th>FPE #</th><th>Pair (FPE name / WBOM name)</th><th>Phone</th><th>WBOM #</th><th>Action</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  </div>
+  <div id="mislabeledSection" style="margin-top:20px"></div>
+</div>
+
+<script>
+let API_KEY = '';
+
+// Live-loaded from GET /reports/unresolved_fpe_employees, category
+// wbom_match_unlinked — replaces the previous hardcoded 33-row snapshot
+// from when this tool was built. See knowledge_base/00_governance/
+// management_decisions.md, Phase 1E, for the full record.
+let CANDIDATES = [];
+
+function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function doLogin() {
+  const key = document.getElementById('keyInput').value.trim();
+  if (!key) return;
+  API_KEY = key;
+  localStorage.setItem('fpe_api_key', key);
+  boot();
+}
+
+async function loadCandidates() {
+  const tableHost = document.getElementById('tableHost');
+  const progress = document.getElementById('progress');
+  progress.textContent = 'Loading…';
+  let resp;
+  try {
+    resp = await fetch('/reports/unresolved_fpe_employees', {
+      headers: { 'X-Internal-Key': API_KEY },
+    });
+  } catch (e) {
+    progress.innerHTML = `<span style="color:var(--err)">Network error loading the report: ${esc(e.message)}. <button class="btn" onclick="loadCandidates()">Retry</button></span>`;
+    return;
+  }
+  if (resp.status === 403) {
+    progress.innerHTML = '<span style="color:var(--err)">Unauthorized — the API key was rejected. Log in again.</span>';
+    localStorage.removeItem('fpe_api_key');
+    document.getElementById('app').style.display = 'none';
+    document.getElementById('loginBox').style.display = 'block';
+    return;
+  }
+  if (!resp.ok) {
+    progress.innerHTML = `<span style="color:var(--err)">Report request failed (HTTP ${resp.status}). <button class="btn" onclick="loadCandidates()">Retry</button></span>`;
+    return;
+  }
+  const data = await resp.json();
+  const rows = data.rows || [];
+  CANDIDATES = rows
+    .filter(r => r.bucket === 'wbom_match_unlinked')
+    .map(r => ({
+      fpe_id: r.fpe_id,
+      fpe_name: r.fpe_name,
+      wbom_id: r.wbom_match_id,
+      wbom_name: r.wbom_match_name,
+      phone: r.phone,
+      mismatch: !!r.name_mismatch,
+    }));
+  const mislabeled = rows.filter(r => r.bucket === 'linked_but_mislabeled');
+  const s = data.summary || {};
+  progress.innerHTML =
+    `<span><b>${s.wbom_match_unlinked_count ?? CANDIDATES.length}</b> unlinked candidate pairs` +
+    (s.no_wbom_match_count ? ` &nbsp;·&nbsp; ${s.no_wbom_match_count} in wbom-create-link.html` : '') +
+    `</span><button class="btn" onclick="loadCandidates()">↻ Refresh</button>`;
+  renderRows();
+  renderMislabeledSection(mislabeled);
+}
+
+function renderRows() {
+  const tableHost = document.getElementById('tableHost');
+  if (CANDIDATES.length === 0) {
+    tableHost.innerHTML = '<div style="text-align:center;padding:40px 20px;color:var(--muted)">✅ Nothing to review — wbom_match_unlinked is empty.</div>';
+    return;
+  }
+  tableHost.innerHTML = `<table>
+    <thead><tr><th>FPE #</th><th>Pair (FPE name / WBOM name)</th><th>Phone</th><th>WBOM #</th><th>Action</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>`;
+  document.getElementById('rows').innerHTML = CANDIDATES.map((c, i) => `
+    <tr id="row-${i}" class="${c.mismatch ? 'mismatch' : ''}">
+      <td>#${c.fpe_id}</td>
+      <td>
+        <div class="pair">
+          <span class="fpe">${esc(c.fpe_name)}</span>
+          <span class="wbom">↔ ${esc(c.wbom_name)}</span>
+        </div>
+        ${c.mismatch ? '<span class="warn-badge">⚠ name mismatch</span>' : ''}
+      </td>
+      <td class="mono">${esc(c.phone)}</td>
+      <td>#${c.wbom_id}</td>
+      <td>
+        <button class="btn link" id="link-${i}" onclick="linkPair(${i})">Link These Two</button>
+        <button class="btn skip" id="skip-${i}" onclick="skipPair(${i})">Skip</button>
+        <div class="status" id="status-${i}"></div>
+      </td>
+    </tr>
+  `).join('');
+}
+
+function renderMislabeledSection(mislabeled) {
+  const host = document.getElementById('mislabeledSection');
+  // Always shown, even at zero — future regression detection is the point
+  // (this bucket should stay empty after Phase 1C's atomic-resolve fix; a
+  // nonzero count here would mean a writer regressed).
+  host.innerHTML = `
+    <details ${mislabeled.length ? '' : 'open'}>
+      <summary style="cursor:pointer;color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.5px">
+        linked_but_mislabeled — ${mislabeled.length} row${mislabeled.length === 1 ? '' : 's'}
+        ${mislabeled.length ? '<span class="warn-badge">⚠ unexpected after Phase 1C</span>' : ''}
+      </summary>
+      ${mislabeled.length === 0
+        ? '<p class="sub" style="margin-top:8px">None — already-linked rows are correctly labeled resolved. No action needed here.</p>'
+        : `<table style="margin-top:8px"><thead><tr><th>FPE #</th><th>Name</th><th>WBOM Employee ID (already linked)</th><th>Resolution status</th></tr></thead>
+           <tbody>${mislabeled.map(r => `<tr><td>#${r.fpe_id}</td><td>${esc(r.fpe_name)}</td><td>#${r.wbom_employee_id}</td><td>${esc(r.resolution_status)}</td></tr>`).join('')}</tbody></table>
+           <p class="sub" style="margin-top:8px;color:var(--warn)">These rows are already linked but resolution_status wasn't updated — read-only here, no link action needed. If this is nonzero, a writer may have regressed past Phase 1C's fix; report it.</p>`}
+    </details>`;
+}
+
+function skipPair(i) {
+  document.getElementById(`row-${i}`).classList.add('skipped');
+  document.getElementById(`link-${i}`).disabled = true;
+  document.getElementById(`skip-${i}`).disabled = true;
+  document.getElementById(`status-${i}`).textContent = 'Skipped (no change made)';
+}
+
+async function linkPair(i) {
+  const c = CANDIDATES[i];
+  if (!confirm(`Link FPE #${c.fpe_id} (${c.fpe_name}) to WBOM #${c.wbom_id} (${c.wbom_name})?`)) return;
+  const linkBtn = document.getElementById(`link-${i}`);
+  const skipBtn = document.getElementById(`skip-${i}`);
+  const statusEl = document.getElementById(`status-${i}`);
+  linkBtn.disabled = true;
+  skipBtn.disabled = true;
+  statusEl.textContent = 'Linking…';
+  statusEl.className = 'status';
+  try {
+    const r = await fetch('/api/admin/employees/link-fpe', {
+      method: 'POST',
+      headers: { 'X-Internal-Key': API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fpe_id: c.fpe_id, wbom_id: c.wbom_id }),
+    });
+    const d = await r.json();
+    if (!r.ok) {
+      const detail = Array.isArray(d.detail) ? d.detail.map(x => x.msg).join('; ') : (d.detail || ('HTTP ' + r.status));
+      if (r.status === 409) {
+        // Stale row — this FPE employee was already linked (e.g. via the
+        // other page, or another reviewer) since the report was loaded.
+        // Never silently overwrite; surface it and remove the row.
+        statusEl.textContent = 'Already linked elsewhere — removing from list. (' + detail + ')';
+        statusEl.className = 'status';
+        document.getElementById(`row-${i}`).classList.add('done');
+        return;
+      }
+      if (r.status === 404) {
+        statusEl.textContent = 'No longer found (already processed?) — removing from list.';
+        statusEl.className = 'status';
+        document.getElementById(`row-${i}`).classList.add('done');
+        return;
+      }
+      throw new Error(detail);
+    }
+    document.getElementById(`row-${i}`).classList.add('done');
+    statusEl.textContent = '✓ Linked';
+    statusEl.className = 'status ok';
+  } catch (e) {
+    statusEl.textContent = 'Failed: ' + e.message;
+    statusEl.className = 'status err';
+    linkBtn.disabled = false;
+    skipBtn.disabled = false;
+  }
+}
+
+function boot() {
+  document.getElementById('loginBox').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+  loadCandidates();
+}
+
+(function () {
+  const saved = localStorage.getItem('fpe_api_key');
+  if (saved) {
+    API_KEY = saved;
+    boot();
+  }
+})();
+</script>
+</body>
+</html>

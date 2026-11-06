@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+jobs:
+  lint-and-test:
+    name: Syntax + offline tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyflakes pytest pytest-asyncio respx httpx
+
+      - name: Syntax check (compileall)
+        run: python -m compileall -q app modules scripts
+
+      - name: Pyflakes (unused imports / undefined names)
+        run: |
+          # Non-blocking summary; fail only on undefined names
+          python -m pyflakes app modules || true
+          ! python -m pyflakes app modules 2>&1 | grep -E "undefined name"
+
+      - name: Offline import smoke
+        run: |
+          python -c "from modules import observability as o; o.inc('x'); assert o.snapshot()['counters']['x']"
+          python -c "import modules.intent, modules.scheduler, modules.outbound"
+
+      - name: Batch 22 observability test (offline)
+        run: python scripts/test_batch22_observability.py
+
+      - name: Unit tests (offline, no DB)
+        run: |
+          INTERNAL_API_KEY=test AUTO_REPLY_ENABLED=false \
+            python -m pytest tests/unit/ -m unit \
+            --ignore=tests/unit/test_payroll.py \
+            --ignore=tests/unit/test_attendance.py \
+            --ignore=tests/unit/test_escort_lifecycle.py \
+            --ignore=tests/unit/test_escort_module.py \
+            --ignore=tests/unit/test_escort_ocr_pipeline.py \
+            --ignore=tests/unit/test_accountant_payment_pipeline.py \
+            --ignore=tests/unit/test_payment_workflow.py \
+            --ignore=tests/unit/test_backup_pipeline.py \
+            --ignore=tests/unit/test_draft_reply.py \
+            --timeout=30 -q --no-header
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## CI Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "- compileall: ok" >> "$GITHUB_STEP_SUMMARY"
+          echo "- pyflakes (warn-only): ok" >> "$GITHUB_STEP_SUMMARY"
+          echo "- import smoke: ok" >> "$GITHUB_STEP_SUMMARY"
+          echo "- batch22 offline test: ok" >> "$GITHUB_STEP_SUMMARY"

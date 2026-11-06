@@ -1,0 +1,4 @@
+employee_mobile,transaction_type,amount,payment_method,payment_mobile,transaction_date,remarks
+01712345678,Salary,12000,Bkash,01712345678,2026-04-30,April salary
+01712345678,Advance,2000,Cash,,2026-04-10,Emergency advance
+01811111111,Food,500,Cash,,,Daily food allowance

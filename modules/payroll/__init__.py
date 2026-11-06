@@ -1,0 +1,543 @@
+"""
+Fazle Core — Monthly Payroll (Batch 14)
+
+Aggregates Batch 12/13 outputs into monthly payroll runs.
+
+State machine on wbom_payroll_runs.status:
+    draft → reviewed → approved → locked → paid
+                                 ↘ cancelled (from any non-paid state)
+
+All transitions write wbom_payroll_approval_log. Compute is idempotent on
+UNIQUE(employee_id, period_year, period_month) WHERE status<>'cancelled'.
+"""
+from __future__ import annotations
+
+import logging
+from calendar import monthrange
+from datetime import date
+from typing import Optional
+
+import asyncpg
+
+from app.database import fetch_one, fetch_all, execute, fetch_val, get_pool
+import asyncpg
+
+log = logging.getLogger("fazle.payroll")
+
+# ── Config ────────────────────────────────────────────────────────────────────
+DEFAULT_PER_PROGRAM_RATE = 400.0  # ৳/day for escort duty (PAY-01: 12,000 ÷ 30)
+ALLOWED_TRANSITIONS = {
+    "draft":     {"reviewed", "cancelled"},
+    "reviewed":  {"approved", "draft", "cancelled"},
+    "approved":  {"locked", "reviewed", "cancelled"},
+    "locked":    {"paid", "approved", "cancelled"},
+    "paid":      set(),
+    "cancelled": set(),
+}
+
+
+# ── Compute ───────────────────────────────────────────────────────────────────
+
+async def _existing_active_run(employee_id: int, period_year: int, period_month: int) -> Optional[dict]:
+    row = await fetch_one(
+        """SELECT run_id, status, net_salary, total_programs, gross_salary
+           FROM wbom_payroll_runs
+           WHERE employee_id=$1 AND period_year=$2 AND period_month=$3
+             AND status <> 'cancelled'""",
+        employee_id, period_year, period_month,
+    )
+    if not row:
+        return None
+    return {
+        "ok": True, "already_exists": True,
+        "run_id": int(row["run_id"]),
+        "status": row["status"],
+        "net_salary": float(row["net_salary"]),
+        "total_programs": int(row["total_programs"]),
+        "gross_salary": float(row["gross_salary"]),
+    }
+
+
+async def _prorated_basic(
+    basic_salary: float, employee_id: int,
+    period_start: date, period_end: date, calendar_days: int,
+) -> tuple[float, float]:
+    """
+    Settlement formula (docs/NEXT_IMPLEMENTATION_QUEUE.md's canonical spec):
+    basic_salary ÷ calendar_days_in_month × approved_duty_days.
+
+    Reuses modules.payroll.dry_run's own attendance summary (duty days from
+    wbom_attendance rows with entry_source IN ('manual_office','message_parser')
+    only) rather than re-querying wbom_attendance directly, so this stays in
+    lockstep with the eligibility-preview/dry-run/reconciliation numbers an
+    admin already sees before authoritative payroll ever runs.
+
+    Returns (prorated_basic, duty_days).
+    """
+    from modules.payroll.dry_run import _attendance_summary
+
+    att = await _attendance_summary(employee_id, period_start, period_end)
+    duty_days = float(att["total_duty_days"])
+    prorated = round((basic_salary / calendar_days) * duty_days, 2) if calendar_days else 0.0
+    return prorated, duty_days
+
+
+async def compute_run(
+    employee_id: int,
+    period_year: int,
+    period_month: int,
+    computed_by: str,
+    per_program_rate: Optional[float] = None,
+    prorate_basic: bool = False,
+) -> dict:
+    """
+    Idempotent monthly payroll compute. Returns existing active draft when present.
+    Writes wbom_payroll_runs (1 row) + wbom_payroll_run_items (N rows) atomically.
+
+    prorate_basic=True (office-staff path only -- see
+    compute_all_for_period_office_only) prorates the basic-salary component by
+    attendance instead of paying the full flat rate; escort-program pay
+    (already tied to real completed-program-days) is unaffected either way.
+    Default False preserves the escort-inclusive compute_all_for_period()
+    path's existing behavior byte-for-byte.
+    """
+    if not (1 <= period_month <= 12):
+        return {"ok": False, "error": "invalid period_month"}
+
+    # Idempotency: existing active run
+    existing = await _existing_active_run(employee_id, period_year, period_month)
+    if existing:
+        return existing
+
+    emp = await fetch_one(
+        "SELECT employee_id, employee_name, designation, basic_salary, status "
+        "FROM wbom_employees WHERE employee_id=$1",
+        employee_id,
+    )
+    if not emp:
+        return {"ok": False, "error": f"employee {employee_id} not found"}
+
+    basic_salary = float(emp["basic_salary"] or 0)
+    rate = float(per_program_rate if per_program_rate is not None else DEFAULT_PER_PROGRAM_RATE)
+
+    # Period bounds
+    last_day = monthrange(period_year, period_month)[1]
+    period_start = date(period_year, period_month, 1)
+    period_end = date(period_year, period_month, last_day)
+
+    basic_component = basic_salary
+    duty_days: Optional[float] = None
+    if prorate_basic:
+        basic_component, duty_days = await _prorated_basic(
+            basic_salary, employee_id, period_start, period_end, last_day,
+        )
+
+    # Count completed programs in month (count by end_date or program_date when end null)
+    prog_rows = await fetch_all(
+        """SELECT program_id, COALESCE(day_count, 1) AS days,
+                  COALESCE(end_date, program_date) AS effective_date,
+                  mother_vessel
+           FROM wbom_escort_programs
+           WHERE escort_employee_id=$1
+             AND status='completed'
+             AND COALESCE(end_date, program_date) BETWEEN $2 AND $3""",
+        employee_id, period_start, period_end,
+    )
+    total_days = sum(float(r["days"] or 0) for r in prog_rows)
+    total_programs = len(prog_rows)
+    program_allowance = round(total_days * rate, 2)
+
+    # C1B: Sum advances from canonical fpe_cash_transactions within period.
+    # fpe_cash_transactions.employee_id FKs to fpe_employees(id) -- a
+    # different ID space from wbom_employees.employee_id (this function's
+    # own `employee_id` param, confirmed by the wbom_employees lookup
+    # above). Must resolve the linked FPE employee first, matching the
+    # same wbom_employee_id -> fpe_employees resolution _transition()
+    # already uses elsewhere in this file for the "paid" fail-closed check.
+    # No linked (active) FPE employee -> zero advances, not an error and
+    # not a reason to fail the run (Owner decision, 2026-07-18 fix).
+    fpe_link = await fetch_one(
+        "SELECT id FROM fpe_employees WHERE wbom_employee_id=$1 AND status='active'",
+        employee_id,
+    )
+    if fpe_link:
+        advances = await fetch_val(
+            """SELECT COALESCE(SUM(amount), 0) FROM fpe_cash_transactions
+               WHERE employee_id=$1 AND txn_category='advance' AND transaction_status='final'
+                 AND txn_date BETWEEN $2 AND $3""",
+            fpe_link["id"], period_start, period_end,
+        ) or 0
+    else:
+        advances = 0
+    total_advances = float(advances)
+
+    # Sum non-advance deductions (none recorded yet, but reserve hook)
+    other_allowance = 0.0
+    total_deductions = 0.0
+
+    gross = round(basic_component + program_allowance + other_allowance, 2)
+    net = round(max(gross - total_advances - total_deductions, 0), 2)
+
+    # Insert atomically. Two concurrent calls for the same employee/period
+    # both pass the idempotency check above (neither has committed yet) and
+    # both reach this INSERT — the DB's own idx_payroll_runs_unique_active
+    # partial unique index is the real race-safety mechanism (an advisory
+    # lock would just move the race to a different primitive). The loser
+    # catches UniqueViolationError and returns the winner's now-committed
+    # row in the same shape as the idempotency early-return above, instead
+    # of propagating a raw DB exception (found 2026-07-09, test_concurrent_payroll_compute).
+    pool = get_pool()
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                run_id = await conn.fetchval(
+                    """INSERT INTO wbom_payroll_runs
+                          (employee_id, period_year, period_month, status,
+                           basic_salary, total_programs, per_program_rate,
+                           program_allowance, other_allowance, total_advances,
+                           total_deductions, gross_salary, net_salary,
+                           computed_by, created_at, updated_at)
+                       VALUES ($1, $2, $3, 'draft', $4, $5, $6, $7, $8, $9, $10,
+                               $11, $12, $13, NOW(), NOW())
+                       RETURNING run_id""",
+                    employee_id, period_year, period_month,
+                    basic_component, total_programs, rate,
+                    program_allowance, other_allowance, total_advances,
+                    total_deductions, gross, net, computed_by,
+                )
+                # Items: basic, programs, advances
+                basic_notes = f"emp:{employee_id}"
+                if prorate_basic and duty_days is not None:
+                    basic_notes += f" prorated {duty_days:.1f}/{last_day} days"
+                await conn.execute(
+                    """INSERT INTO wbom_payroll_run_items
+                          (run_id, component_type, component_label, amount, sign, source_table, notes)
+                       VALUES ($1, 'basic', 'Basic Salary', $2, '+', 'wbom_employees', $3)""",
+                    run_id, basic_component, basic_notes,
+                )
+                for pr in prog_rows:
+                    await conn.execute(
+                        """INSERT INTO wbom_payroll_run_items
+                              (run_id, component_type, component_label, amount, sign,
+                               source_table, source_id, notes)
+                           VALUES ($1, 'program', $2, $3, '+',
+                                   'wbom_escort_programs', $4, $5)""",
+                        run_id,
+                        f"Program @ {rate}/day × {float(pr['days']):.1f}",
+                        round(float(pr["days"]) * rate, 2),
+                        int(pr["program_id"]),
+                        pr["mother_vessel"],
+                    )
+                if total_advances > 0:
+                    await conn.execute(
+                        """INSERT INTO wbom_payroll_run_items
+                              (run_id, component_type, component_label, amount, sign,
+                               source_table, notes)
+                           VALUES ($1, 'advance', 'Advances Adjusted', $2, '-',
+                                   'fpe_cash_transactions',
+                                   'sum within period')""",
+                        run_id, total_advances,
+                    )
+                await conn.execute(
+                    """INSERT INTO wbom_payroll_approval_log
+                          (run_id, action, actor, from_status, to_status, payload_json)
+                       VALUES ($1, 'compute', $2, NULL, 'draft',
+                               $3::jsonb)""",
+                    run_id, computed_by,
+                    f'{{"total_programs":{total_programs},"net_salary":{net}}}',
+                )
+    except asyncpg.UniqueViolationError:
+        # Lost the race — another concurrent compute_run() call for this
+        # exact employee/period committed first. Return its row instead of
+        # raising, matching the idempotency early-return above.
+        winner = await _existing_active_run(employee_id, period_year, period_month)
+        if winner:
+            log.info(
+                f"[payroll] compute_run race: employee={employee_id} "
+                f"{period_year}-{period_month:02d} lost to concurrent run_id={winner['run_id']}"
+            )
+            return winner
+        raise  # extremely unlikely: winner's row vanished between conflict and re-select
+
+    log.info(f"[payroll] computed run {run_id} emp={employee_id} {period_year}-{period_month:02d} "
+             f"days={total_days} net={net}")
+    return {
+        "ok": True, "already_exists": False,
+        "run_id": int(run_id), "status": "draft",
+        "employee_id": employee_id, "employee_name": emp["employee_name"],
+        "period": f"{period_year}-{period_month:02d}",
+        "basic_salary": basic_component, "per_program_rate": rate,
+        "total_programs": total_programs, "total_days": total_days,
+        "program_allowance": program_allowance,
+        "total_advances": total_advances,
+        "gross_salary": gross, "net_salary": net,
+        "duty_days": duty_days,
+    }
+
+
+async def compute_all_for_period(
+    period_year: int, period_month: int, computed_by: str,
+) -> dict:
+    """Compute runs for all Active employees. Idempotent."""
+    rows = await fetch_all(
+        "SELECT employee_id FROM wbom_employees "
+        "WHERE COALESCE(status,'Active')='Active' ORDER BY employee_id"
+    )
+    created = 0; existing = 0; failed = 0
+    run_ids = []
+    for r in rows:
+        result = await compute_run(int(r["employee_id"]), period_year, period_month, computed_by)
+        if not result.get("ok"):
+            failed += 1; continue
+        if result.get("already_exists"):
+            existing += 1
+        else:
+            created += 1
+        run_ids.append(result["run_id"])
+    return {"ok": True, "created": created, "existing": existing,
+            "failed": failed, "total": len(rows), "run_ids": run_ids}
+
+
+async def compute_all_for_period_office_only(
+    period_year: int, period_month: int, computed_by: str,
+) -> dict:
+    """Office Payroll Hardening (Owner decision, 2026-07-11): same as
+    compute_all_for_period, but filtered to structurally-eligible office
+    staff only (modules.payroll.eligibility.classify_office_staff) -- escort
+    employees must never enter office payroll. Guarded behind
+    settings.office_payroll_authoritative_enabled in modules.scheduler's
+    job_daily_payroll; not called anywhere while that flag is False (the
+    default). Calls compute_run(..., prorate_basic=True) (2026-07-15 fix) --
+    the basic-salary component is now prorated by calendar-days/attendance
+    for this path specifically; compute_all_for_period() (the escort-inclusive,
+    currently-authoritative path) is unaffected, still paying the flat rate."""
+    from modules.payroll.eligibility import classify_office_staff
+
+    rows = await fetch_all(
+        "SELECT employee_id, employee_name, designation, status, basic_salary FROM wbom_employees "
+        "WHERE COALESCE(status,'Active')='Active' ORDER BY employee_id"
+    )
+    created = 0; existing = 0; failed = 0; skipped = 0
+    run_ids = []
+    for r in rows:
+        classification = classify_office_staff(dict(r))
+        if not classification["eligible"]:
+            skipped += 1
+            continue
+        result = await compute_run(
+            int(r["employee_id"]), period_year, period_month, computed_by,
+            prorate_basic=True,
+        )
+        if not result.get("ok"):
+            failed += 1; continue
+        if result.get("already_exists"):
+            existing += 1
+        else:
+            created += 1
+        run_ids.append(result["run_id"])
+    return {"ok": True, "created": created, "existing": existing, "failed": failed,
+            "skipped_ineligible": skipped, "total": len(rows), "run_ids": run_ids}
+
+
+# ── Transitions ───────────────────────────────────────────────────────────────
+
+async def _transition(
+    run_id: int, target: str, actor: str,
+    *, reason: Optional[str] = None,
+    payment_method: Optional[str] = None,
+    payment_reference: Optional[str] = None,
+    paid_amount: Optional[float] = None,
+) -> dict:
+    cur = await fetch_one(
+        "SELECT run_id, status, net_salary, employee_id, period_year, period_month "
+        "FROM wbom_payroll_runs WHERE run_id=$1",
+        run_id,
+    )
+    if not cur:
+        return {"ok": False, "error": f"run {run_id} not found"}
+    cur_status = cur["status"]
+    if target not in ALLOWED_TRANSITIONS.get(cur_status, set()):
+        return {"ok": False, "error":
+                f"transition {cur_status} → {target} not allowed"}
+
+    # A "paid" transition must post a canonical fpe_cash_transactions ledger
+    # entry (knowledge_base/06_developer_system/daily_cash_transaction_source_of_truth.md
+    # -- fpe_cash_transactions is the ONLY canonical cash ledger). Fail closed
+    # rather than mark a run paid with no ledger entry: check the FPE bridge
+    # link exists *before* mutating anything.
+    fpe_employee = None
+    if target == "paid":
+        fpe_employee = await fetch_one(
+            "SELECT id, primary_phone FROM fpe_employees "
+            "WHERE wbom_employee_id=$1 AND status='active'",
+            cur["employee_id"],
+        )
+        if not fpe_employee:
+            return {"ok": False, "error":
+                     f"employee {cur['employee_id']} has no linked active FPE "
+                     f"record — cannot post payroll ledger entry, run not marked paid"}
+
+    sets = ["status=$2", "updated_at=NOW()"]
+    params = [run_id, target]
+    idx = 3
+    if target == "reviewed":
+        sets.append(f"submitted_by=${idx}"); params.append(actor); idx += 1
+    elif target == "approved":
+        sets.append(f"approved_by=${idx}"); params.append(actor); idx += 1
+    elif target == "locked":
+        sets.append(f"locked_by=${idx}"); params.append(actor); idx += 1
+    elif target == "paid":
+        sets.append(f"paid_by=${idx}"); params.append(actor); idx += 1
+        sets.append(f"paid_at=NOW()")
+        if payment_method:
+            sets.append(f"payment_method=${idx}"); params.append(payment_method); idx += 1
+        if payment_reference:
+            sets.append(f"payment_reference=${idx}"); params.append(payment_reference); idx += 1
+        # Idempotency key: emp+period+ref
+        idem = f"pr-{cur['employee_id']}-{cur['period_year']}-{cur['period_month']:02d}"
+        if payment_reference:
+            idem += f"-{payment_reference[:30]}"
+        sets.append(f"payout_idempotency_key=${idx}"); params.append(idem); idx += 1
+    elif target == "cancelled":
+        if reason:
+            sets.append(f"correction_reason=${idx}"); params.append(reason); idx += 1
+
+    sql = f"UPDATE wbom_payroll_runs SET {', '.join(sets)} WHERE run_id=$1"
+    try:
+        await execute(sql, *params)
+    except asyncpg.UniqueViolationError as e:
+        return {"ok": False, "error": f"idempotency conflict: {e}"}
+
+    # Audit
+    payload = {}
+    if reason: payload["reason"] = reason
+    if payment_method: payload["method"] = payment_method
+    if payment_reference: payload["ref"] = payment_reference
+    if paid_amount is not None: payload["amount"] = paid_amount
+    import json
+    await execute(
+        """INSERT INTO wbom_payroll_approval_log
+              (run_id, action, actor, from_status, to_status, reason, payload_json)
+           VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)""",
+        run_id, target, actor, cur_status, target, reason, json.dumps(payload),
+    )
+
+    if target == "paid":
+        assert fpe_employee is not None  # guaranteed by the fail-closed check above
+        await _post_payroll_ledger_entry(
+            run_id=run_id, actor=actor, fpe_employee=fpe_employee,
+            period_year=cur["period_year"], period_month=cur["period_month"],
+            amount=paid_amount if paid_amount is not None else float(cur["net_salary"]),
+            payment_method=payment_method, payment_reference=payment_reference,
+        )
+
+    log.info(f"[payroll] run {run_id} {cur_status} → {target} by {actor}")
+    return {"ok": True, "run_id": run_id, "from_status": cur_status,
+            "to_status": target, "net_salary": float(cur["net_salary"])}
+
+
+async def _post_payroll_ledger_entry(
+    *, run_id: int, actor: str, fpe_employee: dict,
+    period_year: int, period_month: int, amount: float,
+    payment_method: Optional[str], payment_reference: Optional[str],
+) -> None:
+    """
+    Write the canonical fpe_cash_transactions entry for a payroll payout.
+    Reuses modules.fazle_payroll_engine.accounting.create_transaction() --
+    the single choke point every other module (draft_approval, payment_correction)
+    already funnels through; never a raw INSERT here.
+    """
+    from decimal import Decimal
+    from modules.fazle_payroll_engine.accounting import create_transaction
+    from modules.fazle_payroll_engine.models import (
+        TransactionCreateRequest, PayoutMethod, TxnCategory,
+        TransactionStatus, PaymentSource,
+    )
+
+    method_lower = (payment_method or "cash").lower()
+    payout_method = (
+        PayoutMethod[method_lower] if method_lower in PayoutMethod.__members__
+        else PayoutMethod.cash
+    )
+    period = f"{period_year}-{period_month:02d}"
+    phone = fpe_employee.get("primary_phone")
+
+    req = TransactionCreateRequest(
+        employee_id=fpe_employee["id"],
+        amount=Decimal(str(amount)),
+        payout_phone=phone,
+        payout_method=payout_method,
+        txn_date=date.today(),
+        txn_category=TxnCategory.salary,
+        accounting_period=period,
+        created_by=f"admin:{actor}",
+        source=PaymentSource.admin_api,
+        source_channel="payroll",
+        source_message_id=f"payroll-run-{run_id}",
+        employee_id_phone=phone,
+        employee_phone=phone,
+        transaction_status=TransactionStatus.final,
+        metadata={"payroll_run_id": run_id, "payment_reference": payment_reference},
+    )
+    txn_row = await create_transaction(req)
+    log.info(
+        f"[payroll] run {run_id} posted ledger txn id={txn_row.id} "
+        f"ref={txn_row.txn_ref[:16]} emp={fpe_employee['id']} amount={amount}"
+    )
+
+
+async def submit_run(run_id: int, actor: str) -> dict:
+    return await _transition(run_id, "reviewed", actor)
+
+async def approve_run(run_id: int, actor: str) -> dict:
+    return await _transition(run_id, "approved", actor)
+
+async def lock_run(run_id: int, actor: str) -> dict:
+    return await _transition(run_id, "locked", actor)
+
+async def mark_paid(run_id: int, actor: str, amount: float,
+                     method: str, reference: Optional[str] = None) -> dict:
+    return await _transition(run_id, "paid", actor,
+                              payment_method=method, payment_reference=reference,
+                              paid_amount=amount)
+
+async def cancel_run(run_id: int, actor: str, reason: str) -> dict:
+    return await _transition(run_id, "cancelled", actor, reason=reason)
+
+
+# ── Queries ───────────────────────────────────────────────────────────────────
+
+async def get_run(run_id: int) -> Optional[dict]:
+    row = await fetch_one(
+        """SELECT r.*, e.employee_name, e.employee_mobile
+           FROM wbom_payroll_runs r
+           JOIN wbom_employees e USING (employee_id)
+           WHERE r.run_id=$1""",
+        run_id,
+    )
+    return dict(row) if row else None
+
+
+async def list_runs(period_year: int, period_month: int,
+                     status: Optional[str] = None) -> list[dict]:
+    if status:
+        rows = await fetch_all(
+            """SELECT r.run_id, r.employee_id, e.employee_name,
+                      r.status, r.gross_salary, r.net_salary, r.total_programs
+               FROM wbom_payroll_runs r
+               JOIN wbom_employees e USING (employee_id)
+               WHERE r.period_year=$1 AND r.period_month=$2 AND r.status=$3
+               ORDER BY r.run_id""",
+            period_year, period_month, status,
+        )
+    else:
+        rows = await fetch_all(
+            """SELECT r.run_id, r.employee_id, e.employee_name,
+                      r.status, r.gross_salary, r.net_salary, r.total_programs
+               FROM wbom_payroll_runs r
+               JOIN wbom_employees e USING (employee_id)
+               WHERE r.period_year=$1 AND r.period_month=$2
+               ORDER BY r.run_id""",
+            period_year, period_month,
+        )
+    return [dict(r) for r in rows]

@@ -1,0 +1,1060 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fazle Core — Admin Dashboard</title>
+<style>
+:root{--bg:#f4f6f8;--card:#fff;--accent:#1a472a;--accent2:#2d6a4f;--err:#e74c3c;--warn:#f39c12;--ok:#27ae60;--muted:#7b8a99;--border:#e1e6ec}
+*{box-sizing:border-box}body{margin:0;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:var(--bg);color:#222;font-size:14px}
+header{background:var(--accent);color:#fff;padding:14px 22px;display:flex;align-items:center;gap:14px;box-shadow:0 2px 4px rgba(0,0,0,.12)}
+header h1{margin:0;font-size:18px;font-weight:600}
+header .spacer{flex:1}
+header .badge{background:rgba(255,255,255,.15);padding:4px 10px;border-radius:12px;font-size:12px}
+nav{background:#fff;border-bottom:1px solid var(--border);padding:0 22px;display:flex;gap:4px;overflow-x:auto}
+nav button{background:none;border:none;padding:12px 16px;cursor:pointer;font-size:14px;color:#555;border-bottom:3px solid transparent;white-space:nowrap}
+.pagelinks{background:#fafafa;border-bottom:1px solid var(--border);padding:6px 22px;display:flex;gap:14px;overflow-x:auto;white-space:nowrap}
+.pagelinks a{color:#555;text-decoration:none;font-size:12px}
+.pagelinks a:hover{color:var(--accent);text-decoration:underline}
+nav button.active{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+main{padding:18px 22px;max-width:1400px;margin:0 auto}
+.card{background:var(--card);border-radius:8px;padding:14px 16px;box-shadow:0 1px 3px rgba(0,0,0,.06);margin-bottom:14px;overflow-x:auto}
+.card h2{margin:0 0 12px;font-size:15px;color:var(--accent2);border-bottom:1px solid var(--border);padding-bottom:8px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.stat{background:#fafbfc;border:1px solid var(--border);border-radius:6px;padding:12px;text-align:center}
+.stat .num{font-size:26px;font-weight:700;color:var(--accent2)}
+.stat .lbl{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-top:4px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--border);vertical-align:top}
+th{background:#fafbfc;font-weight:600;color:#444;font-size:12px;text-transform:uppercase;letter-spacing:.4px}
+tr:hover td{background:#fafbfc}
+.pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+.pill.ok{background:#e8f5ee;color:var(--ok)}
+.pill.err{background:#fdeceb;color:var(--err)}
+.pill.warn{background:#fff5e6;color:var(--warn)}
+.pill.muted{background:#eef0f2;color:var(--muted)}
+.banner{padding:10px 14px;border-radius:6px;margin-bottom:14px;font-weight:600}
+.banner.err{background:var(--err);color:#fff}
+.banner.warn{background:var(--warn);color:#fff}
+.banner.ok{background:var(--ok);color:#fff}
+button.btn{background:var(--accent);color:#fff;border:none;padding:7px 14px;border-radius:5px;cursor:pointer;font-size:13px}
+button.btn:hover{background:var(--accent2)}
+button.btn.sm{padding:4px 10px;font-size:12px}
+button.btn.danger{background:var(--err)}
+input,select{padding:6px 9px;border:1px solid var(--border);border-radius:5px;font-size:13px;font-family:inherit}
+@media(max-width:768px){
+  button.btn{min-height:40px}
+  button.btn.sm{min-height:36px;padding:6px 12px}
+}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+pre{background:#1e1e1e;color:#d4d4d4;padding:12px;border-radius:6px;overflow:auto;font-size:12px;max-height:400px}
+.muted{color:var(--muted)}
+.right{text-align:right}
+#loginOverlay{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:999}
+#loginBox{background:#fff;padding:24px;border-radius:10px;box-shadow:0 10px 40px rgba(0,0,0,.2);min-width:340px}
+#loginBox h2{margin:0 0 14px;color:var(--accent)}
+#toast{position:fixed;bottom:20px;right:20px;background:#222;color:#fff;padding:10px 16px;border-radius:6px;display:none;z-index:9999;box-shadow:0 4px 16px rgba(0,0,0,.3)}
+.tab{display:none}.tab.active{display:block}
+small.dim{color:var(--muted);font-size:11px}
+</style>
+</head>
+<body>
+<div id="loginOverlay">
+  <div id="loginBox">
+    <h2>🔐 Fazle Core</h2>
+    <p class="muted" style="margin:0 0 12px">API key দিন (X-Internal-Key). ব্রাউজারে localStorage-এ সংরক্ষিত হবে।</p>
+    <input id="keyInput" type="password" placeholder="INTERNAL_API_KEY বা fk_..." style="width:100%;margin-bottom:10px" autofocus>
+    <button class="btn" onclick="doLogin()" style="width:100%">Login</button>
+    <p id="loginErr" class="muted" style="margin-top:8px;color:var(--err);min-height:14px"></p>
+  </div>
+</div>
+
+<header>
+  <span style="font-size:22px">🌿</span>
+  <h1>Fazle Core — Admin Dashboard</h1>
+  <span class="spacer"></span>
+  <span id="modeBadge" class="badge">…</span>
+  <span id="clock" class="badge"></span>
+  <button class="btn sm" onclick="refreshAll()">⟳ Refresh</button>
+  <button class="btn sm danger" onclick="logout()">Logout</button>
+</header>
+
+<div class="pagelinks">
+  <a href="/payroll">Payroll</a>
+  <a href="/escort-roster">Escort Roster</a>
+  <a href="/dispatch">Dispatch</a>
+  <a href="/unmatched-confirmations">Unmatched Confirmations</a>
+  <a href="/drafts">Drafts</a>
+  <a href="/kb">KB</a>
+  <a href="/admin/knowledge/recruitment">Recruitment Authority</a>
+  <a href="/open-chat">Open Chat</a>
+  <a href="/wa-chat">WA Chat</a>
+  <a href="/wbom-create-link">WBOM Create Link</a>
+  <a href="/wbom-link-review">WBOM Link Review</a>
+</div>
+
+<nav>
+  <button class="active" data-tab="overview">Overview</button>
+  <button data-tab="drafts">Drafts</button>
+  <button data-tab="reports">Reports</button>
+  <button data-tab="users">Users (B19)</button>
+  <button data-tab="identity-role">Identity–Role</button>
+  <button data-tab="audit">Audit</button>
+  <button data-tab="backups">Backups</button>
+  <button data-tab="scheduler">Scheduler</button>
+  <button data-tab="rag">RAG (B21)</button>
+  <button data-tab="obs">Observability (B22)</button>
+  <button data-tab="chat">💬 Chat Lab</button>
+  <button data-tab="settings">AI & Phone Settings</button>
+</nav>
+
+<main>
+  <div id="banner"></div>
+
+  <!-- OVERVIEW -->
+  <section id="tab-overview" class="tab active">
+    <div class="card">
+      <h2>System Overview</h2>
+      <div id="overviewStats" class="grid">Loading…</div>
+    </div>
+    <div class="card">
+      <h2>Bridges</h2>
+      <div id="bridgesBox">Loading…</div>
+    </div>
+    <div class="card">
+      <h2>Scheduler — Next Jobs</h2>
+      <div id="schedulerMini">Loading…</div>
+    </div>
+    <div class="card">
+      <h2>Backup</h2>
+      <div id="backupMini">Loading…</div>
+    </div>
+  </section>
+
+  <!-- DRAFTS -->
+  <section id="tab-drafts" class="tab">
+    <div class="card">
+      <h2>Pending Reply Drafts</h2>
+      <div id="draftsBox">Loading…</div>
+    </div>
+    <div class="card">
+      <h2>Pending Payment Drafts</h2>
+      <div id="payDraftsBox">Loading…</div>
+    </div>
+  </section>
+
+  <section id="tab-settings" class="tab">
+    <div class="card">
+      <h2>AI Provider Settings</h2>
+      <p class="muted">API keys are write-only and encrypted in the system secret store. Routes stay disabled unless you explicitly enable them and the server is configured to use database routing.</p>
+      <p>Current routing mode: <b id="aiRoutingMode">Loading…</b></p>
+      <div id="aiProviderSettings"></div>
+    </div>
+    <div class="card">
+      <h2>WhatsApp Identity Numbers</h2>
+      <p class="muted">Numbers are stored in the server's .env file. Use Bangladesh mobile numbers; the app normalizes them to 880 format.</p>
+      <div class="row">
+        <label for="accountantPhone">Accountant phone</label>
+        <input id="accountantPhone" type="tel" autocomplete="off" placeholder="01XXXXXXXXX">
+        <button class="btn" onclick="saveAccountantPhone()">Save accountant number</button>
+      </div>
+      <div class="row">
+        <label for="escortPhones">Escort client phones</label>
+        <input id="escortPhones" type="text" autocomplete="off" placeholder="01XXXXXXXXX, 01XXXXXXXXX" style="flex:1;min-width:260px">
+        <button class="btn" onclick="saveEscortPhones()">Save escort numbers</button>
+      </div>
+      <p id="identitySettingsStatus" class="muted"></p>
+    </div>
+  </section>
+
+  <!-- REPORTS -->
+  <section id="tab-reports" class="tab">
+    <div class="card">
+      <h2>Reports (B17)</h2>
+      <div class="row">
+        <select id="reportName"><option>loading…</option></select>
+        <input id="reportArgs" placeholder='Args JSON (e.g. {"date":"today"})' style="flex:1;min-width:240px">
+        <button class="btn" onclick="runReport()">Run</button>
+      </div>
+      <pre id="reportOut">No report run yet.</pre>
+    </div>
+  </section>
+
+  <!-- USERS -->
+  <section id="tab-users" class="tab">
+    <div class="card">
+      <h2>Admin Users</h2>
+      <div id="usersBox">Loading…</div>
+    </div>
+    <div class="card">
+      <h2>Add User</h2>
+      <div class="row">
+        <input id="newPhone" placeholder="Phone (8801…)">
+        <input id="newName" placeholder="Name">
+        <select id="newRole">
+          <option value="viewer">viewer</option>
+          <option value="operator">operator</option>
+          <option value="accountant">accountant</option>
+          <option value="admin">admin</option>
+          <option value="superadmin">superadmin</option>
+        </select>
+        <button class="btn" onclick="addUser()">Add</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- IDENTITY–ROLE -->
+  <section id="tab-identity-role" class="tab">
+    <div class="card">
+      <h2>Identity–Role control</h2>
+      <p class="muted">Backend permissions apply independently. Display names are evidence only; this view never sends or releases queued messages.</p>
+      <div class="row"><input id="irSearch" placeholder="Search verified/display name"><button class="btn" onclick="searchIdentityRole()">Search</button></div>
+      <div id="irSearchBox" class="muted">No search performed.</div>
+    </div>
+    <div class="card">
+      <h2>Selected identity</h2><div id="irDetail" class="muted">Select an identity above.</div>
+    </div>
+    <div class="card">
+      <h3>Metadata correction</h3>
+      <div class="row"><input id="irDisplayName" placeholder="Approved display name"><input id="irVerifiedName" placeholder="Verified name"><input id="irReason" placeholder="Required reason" style="flex:1"><button class="btn" onclick="correctIdentityRole()">Save correction</button></div>
+    </div>
+    <div class="card">
+      <h3>Identifier link</h3>
+      <div class="row"><input id="irIdentifierPlatform" value="whatsapp" placeholder="Platform"><input id="irIdentifierValue" placeholder="JID/mobile/Meta ID"><input id="irIdentifierType" value="whatsapp_jid" placeholder="Identifier type"><input id="irIdentifierEvidence" placeholder="Evidence source"><input id="irIdentifierReason" placeholder="Required reason" style="flex:1"><button class="btn" onclick="linkIdentityIdentifier()">Add link</button></div>
+    </div>
+    <div class="card">
+      <h3>Assign role</h3>
+      <div class="row"><input id="irRole" placeholder="Role"><input id="irDomain" placeholder="Business domain"><input id="irScopeType" value="global" placeholder="Scope type"><input id="irScopeKey" placeholder="Scope key"><input id="irRoleReason" placeholder="Required reason" style="flex:1"><button class="btn" onclick="assignIdentityRole()">Assign</button></div>
+    </div>
+    <div class="card">
+      <h3>Place hold</h3>
+      <div class="row"><select id="irHoldType"><option value="identity">Identity hold</option><option value="conversation">Conversation hold</option></select><input id="irConversationKey" placeholder="Canonical conversation key (conversation only)"><input id="irHoldReason" placeholder="Required reason" style="flex:1"><button class="btn danger" onclick="placeIdentityHold()">Place hold</button></div>
+    </div>
+  </section>
+
+  <!-- AUDIT -->
+  <section id="tab-audit" class="tab">
+    <div class="card">
+      <h2>Audit Log (B19)</h2>
+      <div class="row">
+        <input id="auditCmd" placeholder="filter command (e.g. approve)">
+        <input id="auditLimit" type="number" value="50" style="width:80px">
+        <button class="btn sm" onclick="loadAudit()">Apply</button>
+      </div>
+      <div id="auditBox">Loading…</div>
+    </div>
+  </section>
+
+  <!-- BACKUPS -->
+  <section id="tab-backups" class="tab">
+    <div class="card">
+      <h2>Backups (B18)</h2>
+      <div class="row">
+        <button class="btn" onclick="runBackup()">Run Backup Now</button>
+        <button class="btn sm" onclick="loadBackups()">Refresh List</button>
+      </div>
+      <div id="backupsBox">Loading…</div>
+    </div>
+  </section>
+
+  <!-- SCHEDULER -->
+  <section id="tab-scheduler" class="tab">
+    <div class="card">
+      <h2>Scheduler Jobs (B16)</h2>
+      <div id="schedulerBox">Loading…</div>
+    </div>
+  </section>
+
+  <!-- RAG (B21) -->
+  <section id="tab-rag" class="tab">
+    <div class="card">
+      <h2>RAG Index</h2>
+      <div id="ragStatsBox">Loading…</div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn sm" onclick="loadRag()">Refresh</button>
+        <button class="btn sm" onclick="reindexRag()">Rebuild Index</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Search</h2>
+      <div class="row">
+        <input id="ragQ" placeholder="Ask in Bangla or English (e.g. বেতন কত, address, training)" style="flex:1">
+        <input id="ragK" type="number" value="5" style="width:70px" title="top-k">
+        <button class="btn" onclick="runRagSearch()">Search</button>
+      </div>
+      <div id="ragResults" style="margin-top:10px"></div>
+    </div>
+  </section>
+
+  <!-- CHAT LAB -->
+  <section id="tab-chat" class="tab">
+    <div class="card" style="margin-bottom:10px">
+      <h2>Chat Lab — Admin Knowledge Q&amp;A</h2>
+      <div class="row" style="gap:14px;align-items:flex-start;flex-wrap:wrap">
+        <!-- Model selector -->
+        <div>
+          <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">Model</label>
+          <select id="chatModel" style="min-width:160px">
+            <option value="qwen2.5:3b">qwen2.5:3b (default)</option>
+            <option value="qwen3:8b">qwen3:8b (fast)</option>
+            <option value="qwen3:14b">qwen3:14b (best)</option>
+          </select>
+        </div>
+        <!-- Toggles -->
+        <div style="display:flex;gap:18px;align-items:center;padding-top:20px;flex-wrap:wrap">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+            <input type="checkbox" id="toggleAppCtx" checked>
+            <span>App Context (RAG)</span>
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px" title="KB rows are always included in RAG index">
+            <input type="checkbox" id="toggleDbRead" checked disabled>
+            <span style="color:var(--muted)">DB Read (always on)</span>
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px" title="Internet search — Phase 2 placeholder">
+            <input type="checkbox" id="toggleInternet" disabled>
+            <span style="color:var(--muted)">Internet Search (soon)</span>
+          </label>
+          <button class="btn sm" onclick="clearChatHistory()" style="margin-left:auto">🗑 Clear</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Conversation history -->
+    <div class="card" id="chatHistoryCard" style="min-height:340px;max-height:520px;overflow-y:auto;padding:10px 14px;display:flex;flex-direction:column;gap:10px">
+      <div id="chatMessages" style="display:flex;flex-direction:column;gap:10px">
+        <div style="text-align:center;color:var(--muted);font-size:13px;padding:40px 0">
+          Fazle-কে প্রশ্ন করুন — বাংলায় বা ইংরেজিতে।<br>
+          <small>উদাহরণ: payroll module কোথায়? / WhatsApp bridge কয়টা? / qwen3:8b কি installed?</small>
+        </div>
+      </div>
+    </div>
+
+    <!-- Input row -->
+    <div class="card" style="margin-top:0;padding:10px 14px">
+      <div class="row" style="gap:8px">
+        <textarea id="chatInput" rows="2"
+          placeholder="প্রশ্ন লিখুন… (Shift+Enter = newline, Enter = send)"
+          style="flex:1;resize:vertical;font-family:inherit;font-size:14px;padding:8px 10px;border:1px solid var(--border);border-radius:5px;min-height:48px"></textarea>
+        <button class="btn" id="chatSendBtn" onclick="sendChatMessage()" style="align-self:flex-end;min-width:80px">Send</button>
+      </div>
+      <div id="chatStatus" style="font-size:12px;color:var(--muted);margin-top:4px;min-height:16px"></div>
+    </div>
+  </section>
+
+  <!-- OBSERVABILITY (B22) -->
+  <section id="tab-obs" class="tab">
+    <div class="card">
+      <h2>HTTP Summary</h2>
+      <div id="obsSummaryBox">Loading…</div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn sm" onclick="loadObs()">Refresh</button>
+        <a class="btn sm" href="/metrics" target="_blank">/metrics (Prometheus)</a>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Error Log (recent)</h2>
+      <div id="obsErrorsBox">Loading…</div>
+    </div>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script>
+const KEY_STORAGE = "fazle_api_key";
+let apiKey = localStorage.getItem(KEY_STORAGE) || "";
+
+function showLogin(err){
+  document.getElementById("loginOverlay").style.display = "flex";
+  if(err) document.getElementById("loginErr").textContent = err;
+}
+function hideLogin(){ document.getElementById("loginOverlay").style.display = "none"; }
+function logout(){ localStorage.removeItem(KEY_STORAGE); apiKey=""; showLogin(); }
+function toast(msg, ms=2500){
+  const t = document.getElementById("toast"); t.textContent = msg; t.style.display="block";
+  setTimeout(()=>t.style.display="none", ms);
+}
+async function doLogin(){
+  const k = document.getElementById("keyInput").value.trim();
+  if(!k){ document.getElementById("loginErr").textContent="API key লাগবে"; return; }
+  try {
+    const r = await fetch("/admin/overview", {headers:{"X-Internal-Key":k}});
+    if(r.status===403){ document.getElementById("loginErr").textContent="Invalid key (403)"; return; }
+    if(!r.ok){ document.getElementById("loginErr").textContent="HTTP "+r.status; return; }
+    apiKey = k; localStorage.setItem(KEY_STORAGE, k); hideLogin(); refreshAll();
+  } catch(e){ document.getElementById("loginErr").textContent=String(e); }
+}
+async function api(path, opts={}){
+  const headers = {"X-Internal-Key": apiKey, ...(opts.headers||{})};
+  if(opts.body && typeof opts.body!=="string"){ headers["Content-Type"]="application/json"; opts.body=JSON.stringify(opts.body); }
+  const r = await fetch(path, {...opts, headers});
+  if(r.status===403){ logout(); throw new Error("auth failed"); }
+  if(!r.ok) throw new Error("HTTP "+r.status+": "+await r.text());
+  return r.json();
+}
+
+// Tabs
+document.querySelectorAll("nav button").forEach(b=>{
+  b.onclick = () => {
+    document.querySelectorAll("nav button").forEach(x=>x.classList.remove("active"));
+    document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));
+    b.classList.add("active");
+    document.getElementById("tab-"+b.dataset.tab).classList.add("active");
+    loadTab(b.dataset.tab);
+  };
+});
+
+function fmt(n){ return (n==null)?"—":String(n); }
+function pill(text, kind){ return `<span class="pill ${kind}">${text}</span>`; }
+function escapeHtml(s){ return String(s==null?"":s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+async function loadOverview(){
+  try{
+    const d = await api("/admin/overview");
+    // banner
+    const b = document.getElementById("banner");
+    if(d.safe_mode && d.safe_mode.safe_mode_active){
+      b.innerHTML = '<div class="banner warn">🔒 SAFE MODE — outgoing messages disabled</div>';
+    } else { b.innerHTML = ''; }
+    document.getElementById("modeBadge").textContent = d.safe_mode.safe_mode_active ? "SAFE MODE" : "LIVE";
+    // counts
+    const c = d.counts || {};
+    document.getElementById("overviewStats").innerHTML = [
+      ["Active Employees", c.active_employees],
+      ["Contacts", c.contacts],
+      ["Messages", c.messages],
+      ["Escort Programs", c.escort_programs],
+      ["Recruitment Leads", c.recruitment_leads],
+      ["Pending Drafts", c.pending_drafts],
+      ["Payment Drafts", c.pending_payment_drafts],
+      ["Admin Users", c.admin_users],
+      ["Audit (24h)", d.audit?.last_24h_total],
+      ["Denied (24h)", d.audit?.last_24h_denied],
+    ].map(([l,v]) => `<div class="stat"><div class="num">${fmt(v)}</div><div class="lbl">${l}</div></div>`).join("");
+    // bridges
+    const br = d.bridges || {};
+    const bridgeRow = (lbl, b) => {
+      if(!b) return `<div>${lbl}: ${pill("no data","muted")}</div>`;
+      const ok = !b.error && (b.connected===true || b.status==="ok" || b.healthy===true);
+      return `<div style="margin:6px 0">${lbl}: ${pill(ok?"online":"offline", ok?"ok":"err")} <small class="dim">${escapeHtml(JSON.stringify(b))}</small></div>`;
+    };
+    document.getElementById("bridgesBox").innerHTML =
+      bridgeRow("Bridge 1 (HR)", br.bridge1) + bridgeRow("Bridge 2 (OPS)", br.bridge2);
+    // scheduler mini
+    const s = d.scheduler || {};
+    document.getElementById("schedulerMini").innerHTML = s.error
+      ? `<div class="pill err">${escapeHtml(s.error)}</div>`
+      : `<div>${pill(s.running?"running":"stopped", s.running?"ok":"err")} jobs=<b>${s.jobs}</b> tz=${s.tz}</div>` +
+        `<table style="margin-top:8px"><tr><th>Job</th><th>Next Run</th></tr>` +
+        (s.next_jobs||[]).map(j=>`<tr><td>${escapeHtml(j.id)}</td><td>${escapeHtml(j.next_run||"—")}</td></tr>`).join("") +
+        `</table>`;
+    // backup mini
+    const bk = d.backup || {};
+    if(bk.error){
+      document.getElementById("backupMini").innerHTML = `<div class="pill err">${escapeHtml(bk.error)}</div>`;
+    } else {
+      const ageOk = (bk.age_hours==null) ? false : bk.age_hours < 26;
+      document.getElementById("backupMini").innerHTML =
+        `<div>${pill(ageOk?"fresh":"stale", ageOk?"ok":"warn")} files=<b>${fmt(bk.files)}</b> age=<b>${fmt(bk.age_hours)}h</b> latest=<small>${escapeHtml(bk.latest||"—")}</small></div>`;
+    }
+  } catch(e){ document.getElementById("overviewStats").innerHTML = `<div class="pill err">${e.message}</div>`; }
+}
+
+async function loadDrafts(){
+  try{
+    const [d, p] = await Promise.all([api("/admin/drafts"), api("/admin/payment-drafts")]);
+    const renderRows = (rows, cols) => rows.length===0 ? '<p class="muted">কোনো pending নেই</p>' :
+      `<table><tr>${cols.map(c=>`<th>${c}</th>`).join("")}</tr>` +
+      rows.map(r=>`<tr>${cols.map(c=>`<td>${escapeHtml(r[c])}</td>`).join("")}</tr>`).join("") + `</table>`;
+    const drows = d.drafts || d.rows || d || [];
+    document.getElementById("draftsBox").innerHTML = renderRows(
+      Array.isArray(drows)?drows:[], ["id","source","recipient","intent","status","created_at"]
+    );
+    const prows = p.drafts || p.rows || p || [];
+    document.getElementById("payDraftsBox").innerHTML = renderRows(
+      Array.isArray(prows)?prows:[], ["id","employee_id","amount","method","status","created_at"]
+    );
+  } catch(e){ document.getElementById("draftsBox").innerHTML = `<div class="pill err">${e.message}</div>`; }
+}
+
+async function loadReportsList(){
+  try{
+    const r = await api("/reports");
+    const names = r.reports || r.names || r || [];
+    const sel = document.getElementById("reportName");
+    sel.innerHTML = names.map(n=>`<option value="${n}">${n}</option>`).join("");
+  } catch(e){ document.getElementById("reportName").innerHTML = `<option>error: ${e.message}</option>`; }
+}
+async function runReport(){
+  const name = document.getElementById("reportName").value;
+  const argsStr = document.getElementById("reportArgs").value.trim();
+  let qs = "";
+  if(argsStr){
+    try{
+      const a = JSON.parse(argsStr);
+      qs = "?" + Object.entries(a).map(([k,v])=>`${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&");
+    }catch(e){ toast("Invalid JSON args"); return; }
+  }
+  document.getElementById("reportOut").textContent = "running…";
+  try{
+    const r = await api("/reports/" + encodeURIComponent(name) + qs);
+    document.getElementById("reportOut").textContent = JSON.stringify(r, null, 2);
+  } catch(e){ document.getElementById("reportOut").textContent = "ERROR: " + e.message; }
+}
+
+async function loadUsers(){
+  try{
+    const r = await api("/admin/users");
+    const rows = r.users || [];
+    document.getElementById("usersBox").innerHTML = rows.length===0 ? '<p class="muted">কোনো user নেই</p>' :
+      `<table><tr><th>ID</th><th>Phone</th><th>Name</th><th>Status</th><th>Roles</th><th>Last Seen</th><th>Actions</th></tr>` +
+      rows.map(u=>`<tr>
+        <td>${u.id}</td><td>${escapeHtml(u.phone)}</td><td>${escapeHtml(u.name)}</td>
+        <td>${pill(u.status, u.status==="active"?"ok":"err")}</td>
+        <td>${escapeHtml(u.roles||"")}</td>
+        <td><small class="dim">${escapeHtml(u.last_seen_at||"never")}</small></td>
+        <td>
+          <button class="btn sm" onclick="issueKey('${u.phone}')">🔑 Key</button>
+          <button class="btn sm danger" onclick="disableUser('${u.phone}')">Disable</button>
+        </td>
+      </tr>`).join("") + `</table>`;
+  } catch(e){ document.getElementById("usersBox").innerHTML = `<div class="pill err">${e.message}</div>`; }
+}
+async function addUser(){
+  const phone = document.getElementById("newPhone").value.trim();
+  const name = document.getElementById("newName").value.trim();
+  const role = document.getElementById("newRole").value;
+  if(!phone||!name){ toast("phone + name লাগবে"); return; }
+  try{
+    const r = await api("/admin/users", {method:"POST", body:{phone, name, role}});
+    toast("✓ "+(r.status||"added"));
+    document.getElementById("newPhone").value=""; document.getElementById("newName").value="";
+    loadUsers();
+  } catch(e){ toast("ERROR: "+e.message, 4000); }
+}
+async function issueKey(phone){
+  if(!confirm("Issue new API key for "+phone+"?\nপুরোনো key invalid হয়ে যাবে।")) return;
+  try{
+    const r = await api("/admin/users/"+encodeURIComponent(phone)+"/apikey", {method:"POST"});
+    prompt("API key (একবারই দেখানো হবে — copy করুন):", r.api_key);
+  } catch(e){ toast("ERROR: "+e.message, 4000); }
+}
+async function disableUser(phone){
+  if(!confirm("Disable "+phone+"?")) return;
+  try{ await api("/admin/users/"+encodeURIComponent(phone)+"/disable", {method:"POST"}); toast("✓ disabled"); loadUsers(); }
+  catch(e){ toast("ERROR: "+e.message, 4000); }
+}
+
+let selectedIdentityRole = null;
+function renderIdentityRoleDetail(d){
+  selectedIdentityRole=d.subject.identity_id;
+  const s=d.subject;
+  const links=(d.identifiers||[]).map(x=>`<li>${escapeHtml(x.identifier_type||x.platform)} ${escapeHtml(x.identifier_preview)} — ${escapeHtml(x.verification_state||"unknown")} ${x.active?"":"(revoked)"} ${x.active&&x.verification_state!=="verified"?`<button class="btn sm" onclick="verifyIdentityLink(${x.identity_link_id})">Verify</button>`:""} ${x.active?`<button class="btn sm danger" onclick="revokeIdentityLink(${x.identity_link_id})">Revoke</button>`:""}</li>`).join("")||"<li>none</li>";
+  const roles=(d.roles||[]).map(x=>`<li>${escapeHtml(x.role_name)} / ${escapeHtml(x.business_domain)} / ${escapeHtml(x.scope_type)}${x.scope_key?"="+escapeHtml(x.scope_key):""} — ${x.active?"active":"revoked"} ${x.active?`<button class="btn sm danger" onclick="revokeIdentityRole(${x.assignment_id})">Revoke</button>`:""}</li>`).join("")||"<li>none</li>";
+  const holds=(d.holds||[]).map(x=>`<li>${escapeHtml(x.target_type)}${x.conversation_key?" / "+escapeHtml(x.conversation_key):""} — ${x.active?pill("ACTIVE","err"):pill("released","ok")} — ${escapeHtml(x.reason)} ${x.active?`<button class="btn sm" onclick="releaseIdentityHold(${x.hold_id}, '${encodeURIComponent(x.conversation_key||"")}')">Release hold</button>`:""}</li>`).join("")||"<li>none</li>";
+  const conversations=(d.conversations||[]).map(x=>`<li>#${x.id} ${escapeHtml(x.bridge_id)} / ${escapeHtml(x.business_domain)} — ${escapeHtml(x.state)} — ${escapeHtml(x.updated_at||"")}</li>`).join("")||"<li>none</li>";
+  const legacyBlocks=(d.legacy_phone_blocks||[]).map(x=>`<li>link #${x.identity_link_id}: ${x.active?pill("BLOCKED","err"):pill("not blocked","ok")}</li>`).join("")||"<li>no verified mobile block record</li>";
+  const history=(d.audit||[]).map(x=>`<li><small>${escapeHtml(x.created_at||"")} — ${escapeHtml(x.command||"")} — ${escapeHtml(x.actor_label||"unknown")}</small></li>`).join("")||"<li>none</li>";
+  document.getElementById("irDetail").innerHTML=`<p><b>#${s.identity_id}</b> ${escapeHtml(s.identity_kind)} — ${escapeHtml(s.display_name||"(no display name)")} — auth v${s.authorization_version}</p><p>Verification: ${escapeHtml(s.verification_state)}; lifecycle: ${escapeHtml(s.lifecycle_state)}</p><p>Identifiers</p><ul>${links}</ul><p>Roles and history</p><ul>${roles}</ul><p>Effective holds</p><ul>${holds}</ul><p>Relevant conversations</p><ul>${conversations}</ul><p>Legacy phone-block status</p><ul>${legacyBlocks}</ul><p>Identity–Role audit history</p><ul>${history}</ul><p class="muted">${escapeHtml(d.legacy_phone_block)}</p>`;
+  document.getElementById("irDisplayName").value=s.display_name||""; document.getElementById("irVerifiedName").value=s.verified_name||"";
+}
+async function loadIdentityRole(){ if(!selectedIdentityRole) return; try{ const [d,c,a]=await Promise.all([api("/admin/identity-role/"+selectedIdentityRole),api("/admin/identity-role/"+selectedIdentityRole+"/conversations"),api("/admin/identity-role/"+selectedIdentityRole+"/audit")]); d.conversations=c.items||[]; d.audit=a.items||[]; renderIdentityRoleDetail(d); }catch(e){ document.getElementById("irDetail").innerHTML=`<div class="pill err">${escapeHtml(e.message)}</div>`; } }
+async function searchIdentityRole(){ try{ const q=document.getElementById("irSearch").value; const r=await api("/admin/identity-role/search?q="+encodeURIComponent(q)); const rows=r.items||[]; document.getElementById("irSearchBox").innerHTML=rows.length?`<table><tr><th>ID</th><th>Kind</th><th>Name</th><th>Verification</th><th>Auth version</th><th></th></tr>${rows.map(x=>`<tr><td>${x.identity_id}</td><td>${escapeHtml(x.identity_kind)}</td><td>${escapeHtml(x.display_name||x.verified_name||"—")}</td><td>${escapeHtml(x.verification_state)}</td><td>${x.authorization_version}</td><td><button class="btn sm" onclick="selectIdentityRole(${x.identity_id})">Inspect</button></td></tr>`).join("")}</table>`:"No identities found."; }catch(e){ document.getElementById("irSearchBox").innerHTML=`<div class="pill err">${escapeHtml(e.message)}</div>`; } }
+async function selectIdentityRole(id){ selectedIdentityRole=id; await loadIdentityRole(); }
+function irReason(id){ const v=document.getElementById(id).value.trim(); if(!v){toast("reason required"); return null;} return v; }
+async function correctIdentityRole(){ if(!selectedIdentityRole)return toast("select an identity"); const reason=irReason("irReason"); if(!reason)return; try{await api(`/admin/identity-role/${selectedIdentityRole}/metadata`,{method:"POST",body:{display_name:document.getElementById("irDisplayName").value,verified_name:document.getElementById("irVerifiedName").value,reason}});toast("✓ correction audited");loadIdentityRole();}catch(e){toast(e.message,4000);} }
+async function linkIdentityIdentifier(){ if(!selectedIdentityRole)return toast("select an identity"); const reason=irReason("irIdentifierReason"); if(!reason)return; try{await api(`/admin/identity-role/${selectedIdentityRole}/identifiers`,{method:"POST",body:{action:"link",platform:document.getElementById("irIdentifierPlatform").value,platform_user_id:document.getElementById("irIdentifierValue").value,identifier_type:document.getElementById("irIdentifierType").value,evidence_source:document.getElementById("irIdentifierEvidence").value,reason}});toast("✓ link added and audited");loadIdentityRole();}catch(e){toast(e.message,4000);} }
+async function assignIdentityRole(){ if(!selectedIdentityRole)return toast("select an identity"); const reason=irReason("irRoleReason"); if(!reason)return; try{await api(`/admin/identity-role/${selectedIdentityRole}/roles`,{method:"POST",body:{role_name:document.getElementById("irRole").value,business_domain:document.getElementById("irDomain").value,scope_type:document.getElementById("irScopeType").value,scope_key:document.getElementById("irScopeKey").value,reason}});toast("✓ role assigned");loadIdentityRole();}catch(e){toast(e.message,4000);} }
+async function placeIdentityHold(){ if(!selectedIdentityRole)return toast("select an identity"); const reason=irReason("irHoldReason"); if(!reason)return; try{await api(`/admin/identity-role/${selectedIdentityRole}/holds`,{method:"POST",body:{target_type:document.getElementById("irHoldType").value,conversation_key:document.getElementById("irConversationKey").value,reason}});toast("✓ hold placed; no dispatch");loadIdentityRole();}catch(e){toast(e.message,4000);} }
+async function verifyIdentityLink(id){const reason=prompt("Reason for verification:");if(!reason)return;try{await api(`/admin/identity-role/${selectedIdentityRole}/identifiers`,{method:"POST",body:{action:"verify",identity_link_id:id,reason}});loadIdentityRole();}catch(e){toast(e.message,4000);}}
+async function revokeIdentityLink(id){const reason=prompt("Reason for revocation:");if(!reason)return;try{await api(`/admin/identity-role/${selectedIdentityRole}/identifiers`,{method:"POST",body:{action:"revoke",identity_link_id:id,reason}});loadIdentityRole();}catch(e){toast(e.message,4000);}}
+async function revokeIdentityRole(id){const reason=prompt("Reason for role revocation:");if(!reason)return;try{await api(`/admin/identity-role/${selectedIdentityRole}/roles/${id}/revoke`,{method:"POST",body:{reason}});loadIdentityRole();}catch(e){toast(e.message,4000);}}
+async function releaseIdentityHold(id, encodedKey){const reason=prompt("Reason for hold release (does not send):");if(!reason)return;const conversation_key=encodedKey?decodeURIComponent(encodedKey):undefined;try{await api(`/admin/identity-role/${selectedIdentityRole}/holds/${id}/release`,{method:"POST",body:{reason,conversation_key}});loadIdentityRole();}catch(e){toast(e.message,4000);}}
+
+async function loadAudit(){
+  const cmd = document.getElementById("auditCmd").value.trim();
+  const limit = document.getElementById("auditLimit").value || 50;
+  let url = "/admin/audit?limit="+limit + (cmd ? "&command="+encodeURIComponent(cmd) : "");
+  try{
+    const r = await api(url);
+    const rows = r.audit || [];
+    document.getElementById("auditBox").innerHTML = rows.length===0 ? '<p class="muted">no entries</p>' :
+      `<table><tr><th>When</th><th>Channel</th><th>Cmd</th><th>Actor</th><th>Result</th><th>Details</th></tr>` +
+      rows.map(a=>`<tr>
+        <td><small>${escapeHtml(a.created_at)}</small></td>
+        <td>${escapeHtml(a.channel)}</td>
+        <td><b>${escapeHtml(a.command)}</b></td>
+        <td>${escapeHtml(a.actor_label||a.actor_phone||"?")}</td>
+        <td>${a.allowed?pill("allowed","ok"):pill("DENIED","err")}</td>
+        <td><small class="dim">${escapeHtml(a.denied_reason||a.result_summary||a.args||"")}</small></td>
+      </tr>`).join("") + `</table>`;
+  } catch(e){ document.getElementById("auditBox").innerHTML = `<div class="pill err">${e.message}</div>`; }
+}
+
+async function loadBackups(){
+  try{
+    const r = await api("/backup/list");
+    const rows = r.backups || r.rows || r || [];
+    document.getElementById("backupsBox").innerHTML = (Array.isArray(rows)&&rows.length) ?
+      `<table><tr><th>File</th><th>Status</th><th>Size MB</th><th>Started</th><th>Duration</th></tr>` +
+      rows.map(b=>{
+        const sz = b.file_size_bytes ? (b.file_size_bytes/1048576).toFixed(1) : "—";
+        return `<tr>
+          <td><small>${escapeHtml(b.filename)}</small></td>
+          <td>${pill(b.status, b.status==="ok"?"ok":(b.status==="rotated"?"muted":"err"))}</td>
+          <td class="right">${sz}</td>
+          <td><small>${escapeHtml(b.started_at)}</small></td>
+          <td class="right">${b.duration_ms||"—"}ms</td>
+        </tr>`;
+      }).join("") + `</table>`
+      : '<p class="muted">no backups recorded yet</p>';
+  } catch(e){ document.getElementById("backupsBox").innerHTML = `<div class="pill err">${e.message}</div>`; }
+}
+async function runBackup(){
+  if(!confirm("Trigger DB backup now? (~15s)")) return;
+  toast("backup running…", 4000);
+  try{
+    const r = await api("/backup/run", {method:"POST"});
+    toast("✓ backup ok: "+(r.filename||"done"), 4000); loadBackups();
+  } catch(e){ toast("ERROR: "+e.message, 5000); }
+}
+
+async function loadScheduler(){
+  try{
+    const r = await api("/scheduler/status");
+    const jobs = r.jobs || [];
+    document.getElementById("schedulerBox").innerHTML =
+      `<div>${pill(r.enabled?"enabled":"disabled", r.enabled?"ok":"err")} tz=${r.tz} jobs=<b>${jobs.length}</b></div>` +
+      `<table style="margin-top:10px"><tr><th>Job</th><th>Last Status</th><th>Last Run</th><th>Next Run</th><th>Runs</th></tr>` +
+      jobs.map(j=>`<tr>
+        <td><b>${escapeHtml(j.job_name)}</b></td>
+        <td>${j.last_status?pill(j.last_status, j.last_status==="ok"?"ok":"err"):pill("never","muted")}</td>
+        <td><small>${escapeHtml(j.last_run_at||"—")}</small></td>
+        <td><small>${escapeHtml(j.next_run_at||"—")}</small></td>
+        <td class="right">${j.run_count||0}</td>
+      </tr>`).join("") +
+      `</table>`;
+  } catch(e){ document.getElementById("schedulerBox").innerHTML = `<div class="pill err">${e.message}</div>`; }
+}
+
+// RAG (B21)
+async function loadRag(){
+  try{
+    const s = await api("/rag/stats");
+    const by = s.by_source_kind || {};
+    const builtAt = s.built_at ? new Date(s.built_at*1000).toLocaleString() : "—";
+    document.getElementById("ragStatsBox").innerHTML =
+      `<div>${pill("docs "+s.docs,"ok")} ${pill("vocab "+s.vocab,"ok")} ` +
+      `${pill("avgdl "+s.avgdl,"muted")} ${pill("build "+s.build_ms+"ms","muted")}</div>` +
+      `<div style="margin-top:6px"><small>by source: ${escapeHtml(JSON.stringify(by))} · chunk=${s.chunk_size}/${s.chunk_overlap} · built ${escapeHtml(builtAt)}</small></div>`;
+  } catch(e){ document.getElementById("ragStatsBox").innerHTML = `<div class="pill err">${e.message}</div>`; }
+}
+async function reindexRag(){
+  try{ const r = await api("/rag/reindex", {method:"POST"}); toast("rebuilt: "+r.stats.docs+" docs"); loadRag(); }
+  catch(e){ toast("error: "+e.message); }
+}
+async function runRagSearch(){
+  const q = document.getElementById("ragQ").value.trim();
+  const k = parseInt(document.getElementById("ragK").value||"5",10);
+  if(!q){ return; }
+  const box = document.getElementById("ragResults");
+  box.innerHTML = "Searching…";
+  try{
+    const r = await api("/rag/search?q="+encodeURIComponent(q)+"&k="+k);
+    if(!r.hits.length){ box.innerHTML = `<div class="pill muted">no hits</div>`; return; }
+    box.innerHTML = r.hits.map((h,i)=>
+      `<div class="card" style="margin:8px 0">
+        <div>${pill("#"+(i+1),"ok")} ${pill("score "+h.score,"muted")} ${pill(escapeHtml(h.source),"muted")}</div>
+        <div style="margin-top:4px"><small><b>${escapeHtml(h.title)}</b> · chunk ${h.chunk_idx}</small></div>
+        <pre style="white-space:pre-wrap;margin-top:6px">${escapeHtml(h.text)}</pre>
+      </div>`).join("");
+  } catch(e){ box.innerHTML = `<div class="pill err">${e.message}</div>`; }
+}
+
+// Observability (B22)
+async function loadObs(){
+  try{
+    const s = await api("/observability/summary");
+    const statusBadges = Object.entries(s.http_by_status||{}).map(([k,v])=>{
+      const tone = k.startsWith("2")?"ok":(k.startsWith("4")?"warn":"err");
+      return pill(k+": "+v, tone);
+    }).join(" ");
+    document.getElementById("obsSummaryBox").innerHTML =
+      `<div>${pill("uptime "+s.uptime_s+"s","muted")} ${pill("requests "+s.http_total,"ok")} ` +
+      `${pill("avg "+s.http_avg_ms+"ms","muted")} ${pill("errors 24h "+s.errors_24h, s.errors_24h>0?"warn":"ok")}</div>` +
+      `<div style="margin-top:6px">${statusBadges||"<small>no traffic yet</small>"}</div>` +
+      `<table style="margin-top:10px"><tr><th>Top Path</th><th class="right">Count</th></tr>` +
+      (s.top_paths||[]).map(p=>`<tr><td><code>${escapeHtml(p.path)}</code></td><td class="right">${p.count}</td></tr>`).join("") +
+      `</table>`;
+  } catch(e){ document.getElementById("obsSummaryBox").innerHTML = `<div class="pill err">${e.message}</div>`; }
+  try{
+    const r = await api("/observability/errors?limit=30");
+    const rows = r.rows||[];
+    document.getElementById("obsErrorsBox").innerHTML = rows.length
+      ? `<table><tr><th>Module</th><th>Type</th><th>Message</th><th class="right">Count</th><th>Last Seen</th></tr>` +
+        rows.map(e=>`<tr>
+          <td><b>${escapeHtml(e.module||"")}</b></td>
+          <td>${pill(escapeHtml(e.error_type||""),"err")}</td>
+          <td><small>${escapeHtml((e.message||"").slice(0,200))}</small></td>
+          <td class="right">${e.count}</td>
+          <td><small>${escapeHtml(e.last_seen||"—")}</small></td>
+        </tr>`).join("") + `</table>`
+      : `<div class="pill ok">no errors recorded</div>`;
+  } catch(e){ document.getElementById("obsErrorsBox").innerHTML = `<div class="pill err">${e.message}</div>`; }
+}
+
+// ── Chat Lab ──────────────────────────────────────────────────────────────────
+let _chatHistory = [];  // [{role:"user"|"assistant", content:str}]
+let _chatBusy = false;
+
+function _chatBubble(role, content, meta){
+  const isUser = role === "user";
+  const time = new Date().toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"});
+  const metaHtml = meta
+    ? `<div style="margin-top:4px;font-size:11px;color:var(--muted)">${escapeHtml(meta)}</div>`
+    : "";
+  return `<div style="display:flex;flex-direction:column;align-items:${isUser?"flex-end":"flex-start"}">
+    <div style="max-width:82%;background:${isUser?"var(--accent)":"#f0f2f4"};color:${isUser?"#fff":"#222"};
+      padding:10px 13px;border-radius:${isUser?"14px 14px 4px 14px":"14px 14px 14px 4px"};
+      font-size:13px;line-height:1.55;white-space:pre-wrap;word-break:break-word">
+      ${escapeHtml(content)}
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin-top:3px;padding:0 4px">${time}${isUser?"":" · Fazle"}</div>
+    ${metaHtml}
+  </div>`;
+}
+
+function _chatScroll(){
+  const card = document.getElementById("chatHistoryCard");
+  card.scrollTop = card.scrollHeight;
+}
+
+function _chatSetBusy(busy){
+  _chatBusy = busy;
+  const btn = document.getElementById("chatSendBtn");
+  const status = document.getElementById("chatStatus");
+  btn.disabled = busy;
+  btn.textContent = busy ? "…" : "Send";
+  status.textContent = busy ? "Fazle ভাবছে… (30-120s সময় লাগতে পারে)" : "";
+}
+
+async function sendChatMessage(){
+  if(_chatBusy) return;
+  const input = document.getElementById("chatInput");
+  const q = input.value.trim();
+  if(!q) return;
+
+  const model = document.getElementById("chatModel").value;
+  const appCtx = document.getElementById("toggleAppCtx").checked;
+
+  // Render user bubble
+  const msgs = document.getElementById("chatMessages");
+  msgs.innerHTML += _chatBubble("user", q);
+  _chatHistory.push({role:"user", content:q});
+  input.value = "";
+  _chatScroll();
+  _chatSetBusy(true);
+
+  // Typing indicator
+  const typingId = "chatTyping_" + Date.now();
+  msgs.innerHTML += `<div id="${typingId}" style="color:var(--muted);font-size:13px;padding:4px 8px">Fazle টাইপ করছে…</div>`;
+  _chatScroll();
+
+  try{
+    const r = await api("/chat/message", {
+      method: "POST",
+      body: {
+        q,
+        model,
+        history: _chatHistory.slice(-10),
+        app_context: appCtx,
+      }
+    });
+    document.getElementById(typingId)?.remove();
+    const answer = r.answer || "উত্তর পাওয়া যায়নি।";
+    const metaParts = [];
+    if(r.model) metaParts.push("model: "+r.model);
+    if(r.rag_used) metaParts.push("RAG ✓"+(r.top_score?" score:"+r.top_score.toFixed(2):""));
+    if(r.fallback) metaParts.push("⚠ LLM fallback");
+    msgs.innerHTML += _chatBubble("assistant", answer, metaParts.join(" · "));
+    _chatHistory.push({role:"assistant", content:answer});
+  } catch(e){
+    document.getElementById(typingId)?.remove();
+    msgs.innerHTML += _chatBubble("assistant", "⚠ Error: "+e.message);
+  }
+
+  _chatSetBusy(false);
+  _chatScroll();
+}
+
+function clearChatHistory(){
+  _chatHistory = [];
+  document.getElementById("chatMessages").innerHTML =
+    `<div style="text-align:center;color:var(--muted);font-size:13px;padding:40px 0">
+      কথোপকথন মুছে ফেলা হয়েছে। নতুন প্রশ্ন করুন।
+    </div>`;
+}
+
+async function loadChat(){
+  // Load available models and update selector
+  try{
+    const r = await api("/chat/models");
+    const sel = document.getElementById("chatModel");
+    sel.innerHTML = "";
+    for(const m of r.models){
+      const opt = document.createElement("option");
+      opt.value = m.id;
+      const tag = m.active ? " (default)" : (m.available ? "" : " ✗ not installed");
+      opt.textContent = m.id + tag;
+      opt.disabled = !m.available;
+      if(m.active) opt.selected = true;
+      sel.appendChild(opt);
+    }
+  } catch(e){ /* keep default options */ }
+}
+
+// Enter to send, Shift+Enter for newline
+document.addEventListener("DOMContentLoaded", ()=>{
+  const inp = document.getElementById("chatInput");
+  if(inp){
+    inp.addEventListener("keydown", e=>{
+      if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); sendChatMessage(); }
+    });
+  }
+});
+
+function loadTab(tab){
+  if(tab==="overview") loadOverview();
+  else if(tab==="drafts") loadDrafts();
+  else if(tab==="reports"){ loadReportsList(); }
+  else if(tab==="users") loadUsers();
+  else if(tab==="identity-role") loadIdentityRole();
+  else if(tab==="audit") loadAudit();
+  else if(tab==="backups") loadBackups();
+  else if(tab==="scheduler") loadScheduler();
+  else if(tab==="rag") loadRag();
+  else if(tab==="obs") loadObs();
+  else if(tab==="chat") loadChat();
+  else if(tab==="settings") loadSettings();
+}
+
+const AI_PROVIDER_SETTINGS = {
+  "ollama-local": {
+    name: "Ollama (local)",
+    routeId: "core-ollama-admin",
+    secretRef: "local_runtime",
+    baseUrl: "http://127.0.0.1:11434/v1",
+    model: "hermes3:3b",
+    credentialType: "local_runtime",
+    transport: "local_ollama",
+    requiresApiKey: false,
+    priority: 25,
+    privacyClasses: ["local_only","approved_external"],
+  },
+  openrouter: {
+    name: "OpenRouter",
+    routeId: "core-openrouter-admin",
+    secretRef: "openrouter_api_key",
+    baseUrl: "https://openrouter.ai/api/v1",
+    model: "openai/gpt-4o-mini",
+    credentialType: "api_key",
+    transport: "direct_provider",
+    requiresApiKey: true,
+    priority: 50,
+  },
+  gemini: {
+    name: "Google Gemini",
+    routeId: "core-gemini-admin",
+    secretRef: "gemini_api_key",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai/",
+    model: "gemini-2.0-flash",
+    credentialType: "api_key",
+    transport: "direct_provider",
+    requiresApiKey: true,
+    priority: 60,
+  },
+};
+let aiRoutePolicySource = "bootstrap";
+let aiRoutes = [];
+let aiSecrets = [];
+
+function providerSettingsMarkup(provider, route, secret){
+  const cfg = AI_PROVIDER_SETTINGS[provider];
+  const model = route?.model || cfg.model;
+  const baseUrl = route?.base_url || cfg.baseUrl;
+  const enabled = Boolean(route?.enabled);
+  const configured = cfg.requiresApiKey ? Boolean(secret?.configured) : true;
+  const status = route ? (enabled ? "Enabled" : "Disabled") : "Not configured";
+  return `<div class="card">
+    <h3>${escapeHtml(cfg.name)} <span class="pill ${enabled?"ok":"muted"}">${status}</span>
+      <span class="pill ${configured?"ok":"warn"}">${cfg.requiresApiKey ? (configured?"API key saved":"API key needed") : "No API key required"}</span></h3>
+    <div class="row"><label for="${provider}Model">Model ID</label>
+      <input id="${provider}Model" type="text" value="${escapeHtml(model)}" placeholder="${escapeHtml(cfg.model)}" style="flex:1;min-width:220px"></div>
+    <div class="row"><label for="${provider}BaseUrl">Base URL</label>
+      <input id="${provider}BaseUrl" type="url" value="${escapeHtml(baseUrl)}" style="flex:1;min-width:260px"></div>
+    ${cfg.requiresApiKey ? `<div class="row"><label for="${provider}ApiKey">API key</label>
+      <input id="${provider}ApiKey" type="password" autocomplete="new-password" placeholder="${configured?"Leave blank to keep saved key":"Enter provider API key"}" style="flex:1;min-width:220px"></div>
+    ` : ""}
+    <label><input id="${provider}Enabled" type="checkbox" ${enabled?"checked":""}> Enable this AI route</label>
+    <button class="btn" onclick="saveAiProvider('${provider}')">Save ${escapeHtml(cfg.name)} settings</button>
+    <p id="${provider}Status" class="muted"></p>
+  </div>`;
+}
+
+async function loadSettings(){
+  const target = document.getElementById("aiProviderSettings");
+  target.textContent = "Loading provider settings…";
+  const results = await Promise.allSettled([
+    api("/api/assistant/ops/ai-routes"),
+    api("/api/assistant/ops/system-secrets"),
+    api("/api/escort-roster/accountant-phone"),
+    api("/api/escort-roster/escort-clients"),
+  ]);
+  if(results[0].status==="fulfilled"){
+    aiRoutes = results[0].value.routes || [];
+    aiRoutePolicySource = results[0].value.policy_source || "bootstrap";
+    document.getElementById("aiRoutingMode").textContent = aiRoutePolicySource;
+  } else {
+    aiRoutes = [];
+    target.innerHTML = `<p class="pill err">Could not load AI routes: ${escapeHtml(results[0].reason.message)}</p>`;
+  }
+  aiSecrets = results[1].status==="fulfilled" ? (results[1].value.secrets || []) : [];
+  if(results[0].status==="fulfilled"){
+    target.innerHTML = Object.keys(AI_PROVIDER_SETTINGS).map(provider=>{
+      const cfg = AI_PROVIDER_SETTINGS[provider];
+      return providerSettingsMarkup(
+        provider,
+        aiRoutes.find(route=>route.route_id===cfg.routeId),
+        aiSecrets.find(item=>item.secret_ref===cfg.secretRef),
+      );
+    }).join("");
+    if(results[1].status==="rejected"){
+      target.insertAdjacentHTML("afterbegin", `<p class="pill err">Could not load saved-key status: ${escapeHtml(results[1].reason.message)}</p>`);
+    }
+  }
+  const identityStatus = document.getElementById("identitySettingsStatus");
+  const identityErrors = [];
+  if(results[2].status==="fulfilled") document.getElementById("accountantPhone").value = results[2].value.phone || "";
+  else identityErrors.push("Accountant number: "+results[2].reason.message);
+  if(results[3].status==="fulfilled") document.getElementById("escortPhones").value = (results[3].value.phones || []).join(", ");
+  else identityErrors.push("Escort numbers: "+results[3].reason.message);
+  identityStatus.textContent = identityErrors.join(" | ");
+}
+
+async function saveAiProvider(provider){
+  const cfg = AI_PROVIDER_SETTINGS[provider];
+  const status = document.getElementById(provider+"Status");
+  const desiredEnabled = document.getElementById(provider+"Enabled").checked;
+  const model = document.getElementById(provider+"Model").value.trim();
+  const baseUrl = document.getElementById(provider+"BaseUrl").value.trim();
+  const secretValue = cfg.requiresApiKey ? document.getElementById(provider+"ApiKey").value.trim() : "";
+  const knownSecret = aiSecrets.find(item=>item.secret_ref===cfg.secretRef);
+  if(!model || !baseUrl || (cfg.requiresApiKey && !secretValue && !knownSecret?.configured)){
+    status.textContent = cfg.requiresApiKey
+      ? "Enter the model ID, base URL, and API key."
+      : "Enter the model ID and local Ollama base URL.";
+    return;
+  }
+  if(desiredEnabled && aiRoutePolicySource!=="database"){
+    status.textContent = "Database routing is not active (current mode: "+aiRoutePolicySource+"). The route will be saved disabled.";
+  } else if(desiredEnabled && !confirm("Enable "+cfg.name+" as an AI route? This may change which provider handles eligible AI tasks.")){
+    return;
+  } else {
+    status.textContent = "Saving…";
+  }
+  const payload = {
+    route_id: cfg.routeId,
+    display_name: cfg.name+" (Admin)",
+    priority: cfg.priority,
+    transport: cfg.transport,
+    provider,
+    model,
+    base_url: baseUrl,
+    credential_type: cfg.credentialType,
+    credential_ref: cfg.secretRef,
+    allowed_workloads: ["simple_intent_classification","conversational_reply","recruitment_reply","recruitment_decision"],
+    capabilities: ["text_generation","structured_output"],
+    modalities: ["text"],
+    privacy_classes: cfg.privacyClasses || ["approved_external"],
+    cost_class: "standard",
+    latency_classes: ["interactive","background"],
+    context_limit: 32768,
+    structured_output: true,
+    enabled: false,
+    environments: ["development","test","production"],
+    max_attempts: 1,
+    retry_backoff_seconds: 0,
+    eligible_consumers: ["core"],
+  };
+  try{
+    const existingRoute = aiRoutes.some(route=>route.route_id===cfg.routeId);
+    await api(existingRoute ? "/api/assistant/ops/ai-routes/"+cfg.routeId : "/api/assistant/ops/ai-routes", {
+      method: existingRoute ? "PUT" : "POST", body: payload
+    });
+    if(cfg.requiresApiKey){
+      const secretPayload = {
+        credential_type: cfg.credentialType,
+        allowed_providers: [provider],
+        allowed_consumers: ["core"],
+        allowed_workloads: payload.allowed_workloads,
+        enabled: true,
+      };
+      if(secretValue) secretPayload.secret_value = secretValue;
+      await api(knownSecret?.configured
+        ? "/api/assistant/ops/system-secrets/"+cfg.secretRef
+        : "/api/assistant/ops/system-secrets", {
+          method: knownSecret?.configured ? "PUT" : "POST",
+          body: knownSecret?.configured ? secretPayload : {...secretPayload, secret_ref: cfg.secretRef},
+        });
+    }
+    if(desiredEnabled && aiRoutePolicySource==="database"){
+      await api("/api/assistant/ops/ai-routes/"+cfg.routeId, {
+        method: "PUT", body: {...payload, enabled: true}
+      });
+    }
+    if(cfg.requiresApiKey) document.getElementById(provider+"ApiKey").value = "";
+    await loadSettings();
+    const newStatus = document.getElementById(provider+"Status");
+    if(newStatus) newStatus.textContent = desiredEnabled && aiRoutePolicySource!=="database"
+      ? "Saved disabled. Switch UNIFIED_AI_ROUTING_POLICY_SOURCE to database on the server before enabling."
+      : "Settings saved.";
+  } catch(e){
+    status.textContent = "Save failed: "+e.message;
+  }
+}
+
+async function saveAccountantPhone(){
+  const status = document.getElementById("identitySettingsStatus");
+  try{
+    const result = await api("/api/escort-roster/accountant-phone", {
+      method: "PUT", body: {phone: document.getElementById("accountantPhone").value.trim()}
+    });
+    document.getElementById("accountantPhone").value = result.phone;
+    status.textContent = "Accountant number saved.";
+  } catch(e){ status.textContent = "Could not save accountant number: "+e.message; }
+}
+
+async function saveEscortPhones(){
+  const status = document.getElementById("identitySettingsStatus");
+  const phones = document.getElementById("escortPhones").value.split(",").map(phone=>phone.trim()).filter(Boolean);
+  try{
+    const result = await api("/api/escort-roster/escort-clients", {method:"PUT", body:{phones}});
+    document.getElementById("escortPhones").value = result.phones.join(", ");
+    status.textContent = "Escort client numbers saved.";
+  } catch(e){ status.textContent = "Could not save escort numbers: "+e.message; }
+}
+
+function refreshAll(){
+  const active = document.querySelector("nav button.active").dataset.tab;
+  loadOverview();
+  if(active!=="overview") loadTab(active);
+}
+
+setInterval(()=>{ document.getElementById("clock").textContent = new Date().toLocaleTimeString(); }, 1000);
+
+// boot
+if(apiKey){ hideLogin(); refreshAll(); } else { showLogin(); }
+document.getElementById("keyInput").addEventListener("keydown", e=>{ if(e.key==="Enter") doLogin(); });
+</script>
+</body>
+</html>

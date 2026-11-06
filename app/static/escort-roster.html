@@ -1,0 +1,1897 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Escort Roster — Fazle</title>
+<style>
+:root{
+  --bg:#f0f4f8;--card:#fff;--accent:#1a472a;--accent2:#2d6a4f;--accent3:#40916c;
+  --err:#dc2626;--warn:#d97706;--ok:#16a34a;--muted:#64748b;--border:#e2e8f0;
+  --surface:#f8fafc;--text:#1e293b;--text2:#475569;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;
+  background:var(--bg);color:var(--text);font-size:14px;line-height:1.5}
+
+/* ── Login ─────────────────────────────────────────────────────────────── */
+#loginOverlay{position:fixed;inset:0;background:rgba(15,23,42,.7);display:flex;
+  align-items:center;justify-content:center;z-index:9999;backdrop-filter:blur(4px)}
+#loginBox{background:#fff;padding:32px;border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.25);
+  min-width:340px;max-width:90vw}
+#loginBox h2{color:var(--accent);margin-bottom:6px;font-size:20px}
+#loginBox p{color:var(--muted);margin-bottom:20px;font-size:13px}
+#loginBox input{width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:8px;
+  font-size:14px;margin-bottom:12px;outline:none;transition:border-color .2s}
+#loginBox input:focus{border-color:var(--accent)}
+#loginBox .btn{width:100%;padding:11px;font-size:15px}
+#loginErr{min-height:18px;color:var(--err);font-size:13px;margin-top:6px}
+
+/* ── Layout ────────────────────────────────────────────────────────────── */
+#app{display:none;min-height:100vh;flex-direction:column}
+header{background:var(--accent);color:#fff;padding:0 24px;height:56px;
+  display:flex;align-items:center;gap:12px;box-shadow:0 2px 6px rgba(0,0,0,.2);flex-shrink:0}
+header h1{font-size:17px;font-weight:700;letter-spacing:.2px}
+header .spacer{flex:1}
+.badge{background:rgba(255,255,255,.15);padding:3px 10px;border-radius:20px;font-size:12px;font-weight:500}
+.badge.ok{background:rgba(22,163,74,.3)}
+.badge.warn{background:rgba(217,119,6,.35)}
+.badge.err{background:rgba(220,38,38,.3)}
+
+nav{background:#fff;border-bottom:1px solid var(--border);display:flex;gap:0;
+  overflow-x:auto;flex-shrink:0;position:sticky;top:0;z-index:100}
+nav button{background:none;border:none;padding:14px 20px;cursor:pointer;font-size:13px;
+  font-weight:500;color:var(--muted);border-bottom:3px solid transparent;white-space:nowrap;
+  transition:color .15s,border-color .15s}
+nav button:hover{color:var(--accent2)}
+nav button.active{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+main{padding:20px 24px;max-width:1560px;margin:0 auto;width:100%;flex:1}
+
+/* ── Cards ─────────────────────────────────────────────────────────────── */
+.card{background:var(--card);border-radius:10px;padding:18px 20px;
+  box-shadow:0 1px 4px rgba(0,0,0,.07);margin-bottom:16px;border:1px solid var(--border)}
+.card h2{font-size:14px;font-weight:700;color:var(--accent2);margin-bottom:14px;
+  padding-bottom:10px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px}
+
+/* ── Stat Grid ──────────────────────────────────────────────────────────── */
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
+.stat{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px 16px;
+  box-shadow:0 1px 3px rgba(0,0,0,.05)}
+.stat .num{font-size:26px;font-weight:700;color:var(--accent)}
+.stat .lbl{font-size:12px;color:var(--muted);margin-top:2px}
+
+/* ── Buttons ────────────────────────────────────────────────────────────── */
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:7px;
+  border:none;cursor:pointer;font-size:13px;font-weight:600;transition:opacity .15s,background .15s}
+.btn:hover{opacity:.87}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-secondary{background:var(--surface);color:var(--accent2);border:1.5px solid var(--border)}
+.btn-sm{padding:5px 11px;font-size:12px}
+.btn-danger{background:#dc2626;color:#fff;border:1.5px solid #b91c1c}
+.btn-danger:hover{background:#b91c1c}
+.btn-danger:active{background:#991b1b}
+.btn-warn{background:#fef3c7;color:#92400e}
+.btn-ok{background:#dcfce7;color:#166534}
+.btn-icon{padding:5px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:13px}
+.btn-icon:hover{background:var(--surface)}
+.suggest-wrap{position:relative}
+.suggest-drop{display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.12);max-height:220px;overflow-y:auto;z-index:50;margin-top:2px}
+.suggest-drop.open{display:block}
+.suggest-drop .suggest-row{padding:8px 12px;cursor:pointer;font-size:13px}
+.suggest-drop .suggest-row:hover{background:var(--surface)}
+.suggest-drop .suggest-row .name{font-weight:600}
+.suggest-drop .suggest-row .meta{font-size:11px;color:var(--muted)}
+.icon-btn{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border:1px solid var(--border);border-radius:7px;background:#fff;cursor:pointer;font-size:15px}
+.icon-btn:hover{background:var(--surface)}
+.icon-btn.warn{color:#92400e}
+.icon-btn.danger{color:#b91c1c}
+.ph-ico{text-decoration:none;font-size:16px;margin:0 2px;cursor:pointer;opacity:.8;transition:opacity .15s}
+.ph-ico:hover{opacity:1}
+td.phones{white-space:nowrap;min-width:52px;text-align:center}
+
+/* ── Forms ──────────────────────────────────────────────────────────────── */
+input,select,textarea{font-family:inherit;font-size:13px;border:1.5px solid var(--border);
+  border-radius:7px;padding:7px 10px;outline:none;transition:border-color .2s;background:#fff}
+input:focus,select:focus,textarea:focus{border-color:var(--accent3)}
+.filter-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+.filter-row input,.filter-row select{height:34px}
+.filter-row input[type=search]{min-width:200px;flex:1;max-width:320px}
+
+/* ── Table ──────────────────────────────────────────────────────────────── */
+.tbl-wrap{overflow-x:auto;border-radius:8px;border:1px solid var(--border)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+thead th{background:var(--surface);font-weight:600;color:var(--text2);padding:10px 12px;
+  text-align:left;border-bottom:1.5px solid var(--border);white-space:nowrap;cursor:pointer;user-select:none}
+thead th:hover{color:var(--accent)}
+thead th.sorted{color:var(--accent)}
+thead th .sort-icon{display:inline-block;margin-left:3px;font-size:10px;opacity:.6}
+tbody tr{border-bottom:1px solid var(--border);transition:background .1s}
+tbody tr:hover{background:#f8fafb}
+tbody tr:last-child{border-bottom:none}
+td{padding:9px 12px;vertical-align:middle}
+td.num{text-align:right;font-variant-numeric:tabular-nums;font-weight:600}
+td.actions{white-space:nowrap;text-align:center}
+
+.status-badge{display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:600;
+  letter-spacing:.3px;text-transform:uppercase}
+.s-draft{background:#f1f5f9;color:#475569}
+.s-confirmed{background:#d1fae5;color:#065f46}
+.s-active{background:#dcfce7;color:#166534}
+.s-assigned{background:#fef3c7;color:#92400e}
+.s-completed{background:#e0e7ff;color:#3730a3}
+.s-cancelled{background:#fee2e2;color:#dc2626}
+.s-changed{background:#fef3c7;color:#92400e}
+.s-paid{background:#fef9c3;color:#92400e}
+
+/* ── Pagination ─────────────────────────────────────────────────────────── */
+.pager{display:flex;align-items:center;gap:8px;margin-top:12px;flex-wrap:wrap}
+.pager span{color:var(--muted);font-size:12px}
+.pager button{min-width:32px;height:32px;border:1.5px solid var(--border);background:#fff;
+  border-radius:6px;cursor:pointer;font-size:13px;transition:all .15s}
+.pager button:hover:not(:disabled){background:var(--surface);border-color:var(--accent3)}
+.pager button.current{background:var(--accent);color:#fff;border-color:var(--accent)}
+.pager button:disabled{opacity:.4;cursor:not-allowed}
+
+/* ── Slide-over Detail Panel ────────────────────────────────────────────── */
+#detailPanel{position:fixed;inset:0;z-index:500;pointer-events:none}
+#detailOverlay{position:absolute;inset:0;background:rgba(0,0,0,.3);opacity:0;transition:opacity .25s;pointer-events:none}
+#detailDrawer{position:absolute;top:0;right:0;bottom:0;width:min(680px,96vw);
+  background:#fff;box-shadow:-4px 0 24px rgba(0,0,0,.15);transform:translateX(100%);
+  transition:transform .28s cubic-bezier(.4,0,.2,1);overflow-y:auto;display:flex;flex-direction:column}
+#detailPanel.open{pointer-events:all}
+#detailPanel.open #detailOverlay{opacity:1;pointer-events:all}
+#detailPanel.open #detailDrawer{transform:translateX(0)}
+#detailDrawer .dh{padding:16px 20px;background:var(--accent);color:#fff;display:flex;align-items:center;gap:10px;flex-shrink:0}
+#detailDrawer .dh h3{flex:1;font-size:15px;font-weight:700}
+#detailDrawer .dh button{background:rgba(255,255,255,.2);border:none;color:#fff;
+  width:32px;height:32px;border-radius:6px;cursor:pointer;font-size:18px;line-height:1}
+#detailDrawer .db{padding:18px 20px;flex:1}
+.detail-section{margin-bottom:18px}
+.detail-section h4{font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.6px;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid var(--border)}
+.kv-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px 16px}
+.kv{display:flex;flex-direction:column;gap:2px}
+.kv label{font-size:11px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.4px}
+.kv span{font-size:14px;color:var(--text)}
+.kv span.big{font-size:18px;font-weight:700;color:var(--accent)}
+.timeline{list-style:none;padding:0}
+.timeline li{display:flex;gap:12px;padding:8px 0;border-bottom:1px solid var(--border)}
+.timeline li:last-child{border-bottom:none}
+.timeline .tl-time{font-size:11px;color:var(--muted);white-space:nowrap;min-width:120px}
+.timeline .tl-text{font-size:13px;color:var(--text2)}
+
+/* ── Edit Modal ─────────────────────────────────────────────────────────── */
+#editModal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:600;
+  align-items:flex-start;justify-content:center;overflow-y:auto;padding:20px 0}
+#editModal.show{display:flex}
+#editBox{background:#fff;border-radius:12px;padding:24px;width:min(520px,95vw);
+  box-shadow:0 20px 60px rgba(0,0,0,.25);margin:auto;overflow-x:hidden}
+#editBox h3{font-size:16px;font-weight:700;color:var(--accent);margin-bottom:16px}
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
+.form-row-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px}
+.form-field{display:flex;flex-direction:column;gap:4px}
+.form-field label{font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.4px}
+.form-field input,.form-field select,.form-field textarea{width:100%;box-sizing:border-box}
+.modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:18px;padding-top:14px;
+  border-top:1px solid var(--border);flex-wrap:wrap}
+@media(max-width:520px){
+  .form-row{grid-template-columns:1fr}
+  .form-row-3{grid-template-columns:1fr}
+  .modal-actions{justify-content:stretch}
+  .modal-actions button{flex:1}
+  #editDeleteBtn{flex:0 0 100%;order:-1;margin-right:0}
+}
+
+#adminUserModal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:610;
+  align-items:flex-start;justify-content:center;overflow-y:auto;padding:20px 0}
+#adminUserModal.show{display:flex}
+#adminUserBox{background:#fff;border-radius:12px;padding:24px;width:min(640px,95vw);
+  box-shadow:0 20px 60px rgba(0,0,0,.25);margin:auto;overflow-x:hidden}
+#adminUsersTable td.actions{white-space:nowrap}
+
+/* ── Kanban ─────────────────────────────────────────────────────────────── */
+.kanban{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}
+.kb-col{background:var(--surface);border-radius:10px;border:1px solid var(--border);overflow:hidden}
+.kb-col .kb-hdr{padding:10px 14px;font-size:12px;font-weight:700;text-transform:uppercase;
+  letter-spacing:.5px;display:flex;align-items:center;justify-content:space-between}
+.kb-hdr.h-draft{background:#f1f5f9;color:#475569}
+.kb-hdr.h-confirmed{background:#d1fae5;color:#065f46}
+.kb-hdr.h-active,.kb-hdr.h-Running{background:#dcfce7;color:#166534}
+.kb-hdr.h-Assigned{background:#fef3c7;color:#92400e}
+.kb-hdr.h-completed,.kb-hdr.h-Completed{background:#e0e7ff;color:#3730a3}
+.kb-hdr.h-cancelled{background:#fee2e2;color:#dc2626}
+.kb-hdr.h-paid{background:#fef9c3;color:#92400e}
+.kb-body{padding:10px;max-height:400px;overflow-y:auto;display:flex;flex-direction:column;gap:6px}
+.kb-card{background:#fff;border:1px solid var(--border);border-radius:8px;padding:10px 12px;cursor:pointer;
+  transition:box-shadow .15s}
+.kb-card:hover{box-shadow:0 3px 10px rgba(0,0,0,.1)}
+.kb-card .kbc-vessel{font-size:13px;font-weight:600;color:var(--text)}
+.kb-card .kbc-meta{font-size:11px;color:var(--muted);margin-top:3px}
+
+/* ── Slip Queue ─────────────────────────────────────────────────────────── */
+.slip-card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;
+  margin-bottom:10px;display:flex;gap:14px;align-items:flex-start}
+.conf-badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:700}
+.conf-high{background:#dcfce7;color:#166534}
+.conf-med{background:#fef9c3;color:#92400e}
+.conf-low{background:#fee2e2;color:#dc2626}
+
+/* ── Shift Calc ─────────────────────────────────────────────────────────── */
+#calcResult{background:var(--surface);border-radius:8px;padding:14px;margin-top:12px;display:none}
+#calcResult .cr-total{font-size:24px;font-weight:700;color:var(--accent);margin-top:6px}
+
+/* ── Toast ──────────────────────────────────────────────────────────────── */
+#toastZone{position:fixed;bottom:20px;right:20px;z-index:9000;display:flex;flex-direction:column;gap:8px}
+.toast{background:#1e293b;color:#fff;padding:10px 16px;border-radius:8px;font-size:13px;
+  box-shadow:0 4px 16px rgba(0,0,0,.2);opacity:0;transform:translateY(8px);
+  transition:all .25s;max-width:320px;border-left:4px solid var(--ok)}
+.toast.err{border-left-color:var(--err)}
+.toast.warn{border-left-color:var(--warn)}
+.toast.show{opacity:1;transform:translateY(0)}
+
+/* ── Loading ────────────────────────────────────────────────────────────── */
+.spinner{display:inline-block;width:18px;height:18px;border:2.5px solid var(--border);
+  border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.loading-row td{text-align:center;padding:30px;color:var(--muted)}
+
+/* ── Responsive ─────────────────────────────────────────────────────────── */
+@media(max-width:640px){
+  main{padding:12px}
+  header h1{font-size:14px}
+  .filter-row{flex-direction:column}
+  .filter-row input[type=search]{max-width:100%}
+  .kv-grid{grid-template-columns:1fr}
+  .form-row{grid-template-columns:1fr}
+  .icon-btn{width:40px;height:40px}
+  .btn-icon{min-height:40px;padding:8px 10px}
+}
+</style>
+</head>
+<body>
+
+<!-- ── Login Overlay ───────────────────────────────────────────────── -->
+<div id="loginOverlay">
+  <div id="loginBox">
+    <h2>🛡️ Escort Roster</h2>
+    <p>Fazle Security — Escort Management</p>
+    <input type="text" id="usernameInput" placeholder="Username" autocomplete="username">
+    <input type="password" id="passwordInput" placeholder="Password" autocomplete="current-password">
+    <input type="password" id="apiKeyInput" placeholder="API Key (optional fallback)" autocomplete="current-password">
+    <button class="btn btn-primary" onclick="doLogin()">Sign In</button>
+    <div id="loginErr"></div>
+  </div>
+</div>
+
+<!-- ── App Shell ───────────────────────────────────────────────────── -->
+<div id="app" style="display:none;flex-direction:column">
+  <header>
+    <a href="/payroll" class="btn btn-sm" style="background:rgba(255,255,255,.15);color:#fff;border:none;text-decoration:none;margin-right:8px">← Payroll</a>
+    <span>🛡️</span>
+    <h1>Escort Roster</h1>
+    <div class="spacer"></div>
+    <span id="hdrActive" class="badge ok">— active</span>
+    <span id="hdrPending" class="badge warn" style="display:none">— pending slips</span>
+    <button class="btn btn-sm" style="background:rgba(255,255,255,.15);color:#fff;border:none;margin-left:8px"
+      onclick="triggerSyncAll()">🔄 Sync</button>
+    <button class="btn btn-sm" style="background:rgba(255,255,255,.12);color:#fff;border:none;margin-left:6px"
+      onclick="triggerSyncHistory()">📜 History</button>
+  </header>
+
+  <nav>
+    <button class="active" onclick="switchTab('roster')">📋 Roster</button>
+    <button onclick="switchTab('kanban')">🗂️ Kanban</button>
+    <button onclick="switchTab('slips')">📄 Slip Queue</button>
+    <button onclick="switchTab('calc')">🧮 Shift Calc</button>
+    <button onclick="switchTab('config')">⚙️ Config</button>
+    <button onclick="switchTab('attendance')">🕒 Attendance</button>
+    <button onclick="switchTab('netsalary')">💰 Net Salary</button>
+    <button id="adminTabBtn" onclick="switchTab('admin')" style="display:none">👤 Admin</button>
+  </nav>
+
+  <main>
+    <!-- ── Tab: Roster ──────────────────────────────────────────────── -->
+    <div id="tab-roster">
+      <div class="stat-grid" id="statGrid">
+        <div class="stat"><div class="num" id="s-total">—</div><div class="lbl">Total Programs</div></div>
+        <div class="stat"><div class="num" id="s-active">—</div><div class="lbl">Active</div></div>
+        <div class="stat"><div class="num" id="s-completed">—</div><div class="lbl">Completed</div></div>
+        <div class="stat"><div class="num" id="s-draft">—</div><div class="lbl">Draft</div></div>
+        <div class="stat"><div class="num" id="s-amount">—</div><div class="lbl">Total Amount (BDT)</div></div>
+        <div class="stat"><div class="num" id="s-slip">—</div><div class="lbl">Pending Slip Reviews</div></div>
+      </div>
+
+      <div class="card">
+        <h2>📋 Escort Programs
+          <span class="spacer" style="flex:1"></span>
+          <button class="btn btn-sm btn-secondary" onclick="exportCSV()">⬇ Export CSV</button>
+          <button class="btn btn-sm btn-secondary" style="margin-left:8px" onclick="openAddProgram()">➕ Add New Program</button>
+          <button class="btn btn-sm btn-primary" style="margin-left:8px" onclick="loadRoster()">↻ Refresh</button>
+        </h2>
+
+        <div class="filter-row">
+          <input type="search" id="searchInput" placeholder="Search vessel, escort, mobile…"
+            oninput="debounce(loadRoster,400)()">
+          <select id="statusFilter" onchange="loadRoster()">
+            <option value="">All Status</option>
+            <option value="draft">Pending (Draft)</option>
+            <option value="confirmed">Confirmed</option>
+            <option value="assigned">Assigned</option>
+            <option value="running">Running</option>
+            <option value="completed">Completed</option>
+            <option value="cancelled">Cancelled</option>
+          </select>
+          <input type="date" id="startFrom" onchange="loadRoster()" title="Start date from">
+          <input type="date" id="startTo" onchange="loadRoster()" title="Start date to">
+          <select id="pageSz" onchange="loadRoster()">
+            <option value="25">25 / page</option>
+            <option value="50" selected>50 / page</option>
+            <option value="100">100 / page</option>
+          </select>
+        </div>
+
+        <div class="tbl-wrap">
+          <table id="rosterTable">
+            <thead>
+              <tr>
+                <th onclick="setSort('program_id')">S/N<span class="sort-icon"></span></th>
+                <th onclick="setSort('mother_vessel')">Mother Vessel<span class="sort-icon"></span></th>
+                <th onclick="setSort('lighter_vessel')">Lighter<span class="sort-icon"></span></th>
+                <th title="Master & Escort mobiles">📞</th>
+                <th onclick="setSort('escort_name')">Escort Name<span class="sort-icon"></span></th>
+                <th onclick="setSort('start_date')">Start Date<span class="sort-icon"></span></th>
+                <th onclick="setSort('end_date')">End Date<span class="sort-icon"></span></th>
+                <th onclick="setSort('total_days')">Days<span class="sort-icon"></span></th>
+                <th onclick="setSort('total')">Salary<span class="sort-icon"></span></th>
+                <th>R. Point</th>
+                <th onclick="setSort('total')">Conv.<span class="sort-icon"></span></th>
+                <th onclick="setSort('total')">Total<span class="sort-icon"></span></th>
+                <th>Net</th>
+                <th>Status</th>
+                <th class="actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="rosterBody">
+              <tr class="loading-row"><td colspan="14"><span class="spinner"></span> Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pager" id="pager"></div>
+      </div>
+    </div>
+
+    <!-- ── Tab: Kanban ──────────────────────────────────────────────── -->
+    <div id="tab-kanban" style="display:none">
+      <div class="card">
+        <h2>🗂️ Lifecycle Kanban</h2>
+        <div class="kanban" id="kanbanBoard"></div>
+      </div>
+    </div>
+
+    <!-- ── Tab: Slip Queue ──────────────────────────────────────────── -->
+    <div id="tab-slips" style="display:none">
+      <div class="card">
+        <h2>📄 Pending Slip Reviews</h2>
+        <div id="slipQueue"><p style="color:var(--muted);padding:16px">Loading…</p></div>
+        <div id="slipQueuePager" style="margin-top:12px;display:none">
+          <button onclick="slipQueuePrev()" id="slipPrevBtn">← Prev</button>
+          <span id="slipPageInfo" style="margin:0 8px"></span>
+          <button onclick="slipQueueNext()" id="slipNextBtn">Next →</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Tab: Shift Calculator ──────────────────────────────────── -->
+    <div id="tab-calc" style="display:none">
+      <div class="card" style="max-width:500px">
+        <h2>🧮 Shift Calculator</h2>
+        <div class="form-row">
+          <div class="form-field">
+            <label>Start Date</label>
+            <input type="date" id="calcStartDate">
+          </div>
+          <div class="form-field">
+            <label>Start Shift</label>
+            <select id="calcStartShift"><option value="D">Day (D)</option><option value="N">Night (N)</option></select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-field">
+            <label>End Date</label>
+            <input type="date" id="calcEndDate">
+          </div>
+          <div class="form-field">
+            <label>End Shift</label>
+            <select id="calcEndShift"><option value="D">Day (D)</option><option value="N" selected>Night (N)</option></select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-field">
+            <label>Shift Rate (BDT)</label>
+            <input type="number" id="calcRate" value="200" min="0">
+          </div>
+          <div class="form-field">
+            <label>Conveyance (BDT)</label>
+            <input type="number" id="calcConveyance" value="0" min="0">
+          </div>
+        </div>
+        <button class="btn btn-primary" onclick="calcShifts()">Calculate</button>
+        <div id="calcResult">
+          <div class="kv-grid">
+            <div class="kv"><label>Total Shifts</label><span id="cr-shifts" class="big">—</span></div>
+            <div class="kv"><label>Total Days</label><span id="cr-days" class="big">—</span></div>
+            <div class="kv"><label>Salary</label><span id="cr-salary">—</span></div>
+            <div class="kv"><label>Conveyance</label><span id="cr-conv">—</span></div>
+          </div>
+          <div style="margin-top:10px;font-size:12px;color:var(--muted)">Total Payable</div>
+          <div class="cr-total" id="cr-total">—</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Tab: Config ──────────────────────────────────────────────── -->
+    <div id="tab-config" style="display:none">
+      <div class="card">
+        <h2>⚙️ Conveyance & Rate Config</h2>
+        <div class="tbl-wrap">
+          <table id="configTable">
+            <thead><tr>
+              <th>Destination</th><th>Conveyance (BDT)</th><th>Shift Rate (BDT)</th><th>Updated At</th>
+            </tr></thead>
+            <tbody id="configBody">
+              <tr class="loading-row"><td colspan="4"><span class="spinner"></span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border)">
+          <h4 style="font-size:13px;font-weight:700;color:var(--accent2);margin-bottom:10px">Add / Update Entry</h4>
+          <div class="form-row">
+            <div class="form-field"><label>Destination</label><input type="text" id="cfgDest" placeholder="Noapara"></div>
+            <div class="form-field"><label>Conveyance (BDT)</label><input type="number" id="cfgConv" value="0" min="0"></div>
+            <div class="form-field"><label>Shift Rate (BDT)</label><input type="number" id="cfgRate" value="200" min="0"></div>
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="saveConfig()">Save</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>📱 Escort Client Management</h2>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Client Phone</th><th class="actions">Actions</th></tr></thead>
+            <tbody id="escortClientBody">
+              <tr class="loading-row"><td colspan="2"><span class="spinner"></span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border)">
+          <div class="form-row">
+            <div class="form-field">
+              <label>Add Escort Client</label>
+              <input type="tel" id="escortClientInput" placeholder="8801XXXXXXXXX or 01XXXXXXXXX">
+            </div>
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="addEscortClient()">Add Client</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="tab-attendance" style="display:none">
+      <div class="card">
+        <h2>🕒 Attendance</h2>
+        <div class="filter-row">
+          <input type="search" id="attendanceSearch" placeholder="Search escort name / mobile..." oninput="loadAttendance()">
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Program</th><th>Escort</th><th>Mobile</th><th>Start</th><th>End</th><th>Days</th></tr></thead>
+            <tbody id="attendanceBody"><tr class="loading-row"><td colspan="6"><span class="spinner"></span></td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div id="tab-netsalary" style="display:none">
+      <div class="card">
+        <h2>💰 Net Salary</h2>
+        <div class="filter-row">
+          <input type="search" id="netSalarySearch" placeholder="Search escort / vessel..." oninput="loadNetSalary()">
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Program</th><th>Mother</th><th>Escort</th><th>Total</th><th>Food Bill</th><th>Net Payable</th></tr></thead>
+            <tbody id="netSalaryBody"><tr class="loading-row"><td colspan="6"><span class="spinner"></span></td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div id="tab-admin" style="display:none">
+      <div class="card">
+        <h2>👤 Admin Users
+          <span class="spacer" style="flex:1"></span>
+          <button class="btn btn-sm btn-secondary" onclick="loadAdminUsersRoster()">↻ Refresh</button>
+          <button class="btn btn-sm btn-primary" id="adminCreateBtn" style="display:none;margin-left:8px" onclick="openAdminUserModal()">➕ Add User</button>
+        </h2>
+        <div class="filter-row">
+          <input type="search" id="adminUserSearch" placeholder="Search by name / phone / username" oninput="loadAdminUsersRoster()">
+        </div>
+        <div class="tbl-wrap">
+          <table id="adminUsersTable">
+            <thead>
+              <tr>
+                <th>Name</th><th>Phone</th><th>Username</th><th>Status</th><th>Role</th><th>Last Seen</th><th class="actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="adminUsersBody">
+              <tr class="loading-row"><td colspan="7" style="color:var(--muted)">Admin access required</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- ── Detail Slide-over Panel ───────────────────────────────────────── -->
+<div id="detailPanel">
+  <div id="detailOverlay" onclick="closeDetail()"></div>
+  <div id="detailDrawer">
+    <div class="dh">
+      <h3 id="panelTitle">Program Detail</h3>
+      <button onclick="closeDetail()">✕</button>
+    </div>
+    <div class="db" id="panelBody">Loading…</div>
+  </div>
+</div>
+
+<!-- ── Edit Modal ────────────────────────────────────────────────────── -->
+<div id="editModal">
+  <div id="editBox">
+    <h3 id="editModalTitle">✏️ Edit Roster Entry</h3>
+    <input type="hidden" id="editProgramId">
+    <div class="form-row">
+      <div class="form-field"><label>Mother Vessel</label><input type="text" id="editMotherVessel" placeholder="e.g. MV YASA STAR"></div>
+      <div class="form-field"><label>Lighter Vessel</label><input type="text" id="editLighterVessel" placeholder="e.g. MAKSUDA"></div>
+    </div>
+    <div class="form-row-3">
+      <div class="form-field"><label>Master Mobile</label><input type="tel" id="editMasterMobile" placeholder="017…"></div>
+      <div class="form-field">
+        <label>Escort Name</label>
+        <div class="suggest-wrap">
+          <input type="text" id="editEscortName" placeholder="Name" autocomplete="off">
+          <div id="editEscortNameDrop" class="suggest-drop"></div>
+        </div>
+      </div>
+      <div class="form-field"><label>Escort Mobile</label><input type="tel" id="editEscortMobile" placeholder="017…"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-field"><label>Start Date</label><input type="date" id="editStartDate"></div>
+      <div class="form-field"><label>Start Shift</label>
+        <select id="editStartShift"><option value="D">Day (D)</option><option value="N">Night (N)</option></select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-field"><label>End Date</label><input type="date" id="editEndDate"></div>
+      <div class="form-field"><label>End Shift</label>
+        <select id="editEndShift"><option value="D">Day (D)</option><option value="N">Night (N)</option></select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-field"><label>Release Point</label><input type="text" id="editReleasePoint"></div>
+      <div class="form-field"><label>Conveyance (BDT)</label><input type="number" id="editConveyance" min="0"></div>
+    </div>
+    <div class="form-field" style="margin-bottom:12px">
+      <label>Status</label>
+      <select id="editStatus">
+        <option value="draft">Draft</option>
+        <option value="active">Active</option>
+        <option value="completed">Completed</option>
+        <option value="cancelled">Cancelled</option>
+        <option value="paid">Paid</option>
+      </select>
+    </div>
+    <div class="form-field" style="margin-bottom:12px">
+      <label>Notes</label>
+      <textarea id="editNotes" rows="2" style="resize:vertical;width:100%"></textarea>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-danger" id="editDeleteBtn" onclick="deleteDraft()" style="margin-right:auto;display:none">🗑 Delete Draft</button>
+      <button class="btn btn-secondary" onclick="closeEdit()">Cancel</button>
+      <button class="btn btn-primary" id="editSaveBtn" onclick="saveEdit()">Save Changes</button>
+    </div>
+  </div>
+</div>
+
+<div id="adminUserModal">
+  <div id="adminUserBox">
+    <h3 id="adminUserModalTitle">👤 Add Admin User</h3>
+    <input type="hidden" id="adminEditPhoneOriginal">
+    <div class="form-row-3">
+      <div class="form-field"><label>Name</label><input type="text" id="adminUserName" placeholder="Full name"></div>
+      <div class="form-field"><label>Mobile</label><input type="tel" id="adminUserPhone" placeholder="8801XXXXXXXXX"></div>
+      <div class="form-field"><label>Role</label>
+        <select id="adminUserRole">
+          <option value="viewer">viewer</option>
+          <option value="operator">operator</option>
+          <option value="accountant">accountant</option>
+          <option value="admin">admin</option>
+          <option value="superadmin">superadmin</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-field"><label>Username</label><input type="text" id="adminUserUsername" placeholder="login username"></div>
+      <div class="form-field"><label>Status</label>
+        <select id="adminUserStatus">
+          <option value="active">active</option>
+          <option value="disabled">disabled</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-field" style="grid-column:span 2"><label>Password</label><input type="password" id="adminUserPassword" placeholder="Set or reset password"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeAdminUserModal()">Cancel</button>
+      <button class="btn btn-primary" id="adminUserSaveBtn" onclick="saveAdminUser()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Toast Zone ────────────────────────────────────────────────────── -->
+<div id="toastZone"></div>
+
+<script src="/static/shared-auth-fetch.js"></script>
+<script>
+// ─────────────────────────────────────────────────────────────────────────
+// State
+// ─────────────────────────────────────────────────────────────────────────
+let API_KEY = '';
+const BASE = '';
+let _curPage = 1;
+let _sortBy = 'start_date';
+let _sortDir = 'desc';
+let _lastDedupRemoved = 0;
+let _sessionUser = null;
+let _adminUsersCache = [];
+
+// ─────────────────────────────────────────────────────────────────────────
+// Auth
+// ─────────────────────────────────────────────────────────────────────────
+function doLogin() {
+  const username = document.getElementById('usernameInput').value.trim();
+  const password = document.getElementById('passwordInput').value;
+  const fallbackKey = document.getElementById('apiKeyInput').value.trim();
+
+  const loginErr = document.getElementById('loginErr');
+  loginErr.textContent = '';
+
+  const doBoot = async () => {
+    const sessionRes = await apiFetch('/api/admin/session');
+    if (!sessionRes.ok) throw new Error('Session validation failed');
+    const session = await sessionRes.json();
+    _sessionUser = session && session.user ? session.user : null;
+    syncAdminTabVisibility();
+    localStorage.setItem('fpe_api_key', API_KEY);
+    document.getElementById('loginOverlay').style.display = 'none';
+    document.getElementById('app').style.display = 'flex';
+    loadSummary();
+    loadRoster();
+    loadAttendance();
+    loadNetSalary();
+  };
+
+  if (username && password) {
+    fetch('/api/admin/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({mode: 'password', username, password}),
+    }).then(async (r) => {
+      if (!r.ok) throw new Error('Invalid username/password');
+      const data = await r.json();
+      API_KEY = data && data.credential ? data.credential.value : '';
+      if (!API_KEY) throw new Error('Missing login token');
+      await doBoot();
+    }).catch((e) => {
+      loginErr.textContent = e.message || 'Login failed';
+      API_KEY = '';
+    });
+    return;
+  }
+
+  if (!fallbackKey) {
+    loginErr.textContent = 'Enter username/password or API key';
+    return;
+  }
+  API_KEY = fallbackKey;
+  doBoot().catch(() => {
+    loginErr.textContent = 'Invalid credentials';
+    API_KEY = '';
+  });
+}
+document.getElementById('apiKeyInput').addEventListener('keydown', e => { if(e.key==='Enter') doLogin(); });
+document.getElementById('passwordInput').addEventListener('keydown', e => { if(e.key==='Enter') doLogin(); });
+
+// Auto-login from a key already saved by payroll.html (shared 'fpe_api_key'
+// localStorage key, same origin) — mirrors payroll.html's own boot() IIFE so
+// arriving here via the Escort Program link doesn't re-prompt for a password.
+(function boot() {
+  const saved = localStorage.getItem('fpe_api_key');
+  if (!saved) return;
+  API_KEY = saved;
+  apiFetch('/api/admin/session').then(async r => {
+    if (!r.ok) return; // invalid/expired — leave login form showing
+    const session = await r.json();
+    _sessionUser = session && session.user ? session.user : null;
+    syncAdminTabVisibility();
+    document.getElementById('loginOverlay').style.display = 'none';
+    document.getElementById('app').style.display = 'flex';
+    loadSummary();
+    loadRoster();
+    loadAttendance();
+    loadNetSalary();
+  }).catch(() => {});
+})();
+
+// ─────────────────────────────────────────────────────────────────────────
+// API wrapper
+// ─────────────────────────────────────────────────────────────────────────
+// Thin page-specific wrappers over shared-auth-fetch.js — same external
+// names/signatures/behavior as before 2026-07-13, just no longer
+// duplicating the header-building/error-parsing boilerplate that 5 other
+// dashboard pages each independently reimplemented too.
+function apiFetch(path, opts={}) {
+  return FazleAuthFetch.fetch(BASE + path, API_KEY, opts);
+}
+
+async function readApiError(r) {
+  return FazleAuthFetch.readError(r);
+}
+
+async function apiGet(path) {
+  return FazleAuthFetch.getJson(BASE + path, API_KEY);
+}
+
+async function apiPost(path, body) {
+  return FazleAuthFetch.postJson(BASE + path, API_KEY, body);
+}
+
+async function apiPatch(path, body) {
+  return FazleAuthFetch.patchJson(BASE + path, API_KEY, body);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Toast
+// ─────────────────────────────────────────────────────────────────────────
+function toast(msg, type='ok') {
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = msg;
+  document.getElementById('toastZone').appendChild(el);
+  requestAnimationFrame(() => el.classList.add('show'));
+  setTimeout(() => { el.classList.remove('show'); setTimeout(() => el.remove(), 300); }, 3500);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Debounce
+// ─────────────────────────────────────────────────────────────────────────
+function debounce(fn, ms) {
+  let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Tab switching
+// ─────────────────────────────────────────────────────────────────────────
+function switchTab(name) {
+  if (name === 'admin' && !canAccessAdminRosterTab()) {
+    toast('Admin access required', 'err');
+    return;
+  }
+  ['roster','kanban','slips','calc','config','attendance','netsalary','admin'].forEach(t => {
+    document.getElementById('tab-'+t).style.display = t===name ? 'block' : 'none';
+  });
+  document.querySelectorAll('nav button').forEach((b) => b.classList.remove('active'));
+  const map = {
+    roster: 0,
+    kanban: 1,
+    slips: 2,
+    calc: 3,
+    config: 4,
+    attendance: 5,
+    netsalary: 6,
+    admin: 7,
+  };
+  const idx = map[name];
+  if (idx != null) {
+    const btn = document.querySelectorAll('nav button')[idx];
+    if (btn) btn.classList.add('active');
+  }
+  if (name==='kanban') loadKanban();
+  if (name==='slips') loadSlipQueue();
+  if (name==='config') { loadConfig(); loadEscortClients(); }
+  if (name==='attendance') loadAttendance();
+  if (name==='netsalary') loadNetSalary();
+  if (name==='admin') loadAdminUsersRoster();
+}
+
+function normalizedSessionRoles() {
+  const roles = ((_sessionUser && _sessionUser.normalized_roles) || (_sessionUser && _sessionUser.roles) || []);
+  return roles.map(r => String(r || '').toLowerCase());
+}
+
+function hasSessionRole(role) {
+  return normalizedSessionRoles().includes(String(role || '').toLowerCase());
+}
+
+function canAccessAdminRosterTab() {
+  return hasSessionRole('admin') || hasSessionRole('superadmin') || hasSessionRole('owner');
+}
+
+function isSuperAdminRoster() {
+  return hasSessionRole('superadmin') || hasSessionRole('owner');
+}
+
+function syncAdminTabVisibility() {
+  const btn = document.getElementById('adminTabBtn');
+  if (btn) btn.style.display = canAccessAdminRosterTab() ? '' : 'none';
+  const createBtn = document.getElementById('adminCreateBtn');
+  if (createBtn) createBtn.style.display = isSuperAdminRoster() ? '' : 'none';
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Summary
+// ─────────────────────────────────────────────────────────────────────────
+async function loadSummary() {
+  try {
+    const d = await apiGet('/api/escort-roster/summary');
+    const bs = d.by_status || {};
+    const fmt = n => n?.toLocaleString('en-BD') || '0';
+    document.getElementById('s-total').textContent = fmt(d.grand_total);
+    document.getElementById('s-active').textContent = fmt((bs.active||{}).count || 0);
+    document.getElementById('s-completed').textContent = fmt((bs.completed||{}).count || 0);
+    document.getElementById('s-draft').textContent = fmt(d.true_draft_count ?? (bs.draft||{}).count ?? 0);
+    document.getElementById('s-amount').textContent = '৳ ' + fmt(d.grand_total_amount);
+    document.getElementById('s-slip').textContent = fmt(d.pending_slip_reviews);
+    document.getElementById('hdrActive').textContent = `${d.active_programs} active`;
+    if (d.pending_slip_reviews > 0) {
+      document.getElementById('hdrPending').style.display = '';
+      document.getElementById('hdrPending').textContent = `${d.pending_slip_reviews} pending slips`;
+    }
+  } catch(e) { /* non-fatal */ }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Roster Table
+// ─────────────────────────────────────────────────────────────────────────
+async function loadRoster(page, opts={}) {
+  const silent = !!opts.silent;
+  if (page !== undefined) _curPage = page;
+  const search = document.getElementById('searchInput').value.trim();
+  const status = document.getElementById('statusFilter').value;
+  const startFrom = document.getElementById('startFrom').value;
+  const startTo = document.getElementById('startTo').value;
+  const ps = Math.max(1, parseInt(document.getElementById('pageSz').value || '50', 10) || 50);
+  const params = new URLSearchParams({
+    page: String(_curPage),
+    page_size: String(ps),
+    sort_by: _sortBy || 'start_date',
+    sort_dir: _sortDir || 'desc',
+  });
+  if (search) params.set('search', search);
+  if (status) params.set('status', status);
+  if (startFrom) params.set('start_from', startFrom);
+  if (startTo) params.set('start_to', startTo);
+  const url = `/api/escort-roster?${params.toString()}`;
+
+  const tbody = document.getElementById('rosterBody');
+  if (!silent) {
+    tbody.innerHTML = '<tr class="loading-row"><td colspan="14"><span class="spinner"></span> Loading…</td></tr>';
+  }
+
+  try {
+    const d = await apiGet(url);
+    const rawItems = Array.isArray(d.items) ? d.items : [];
+    const dedupedItems = dedupeRosterItems(rawItems);
+    renderRosterRows(dedupedItems);
+    renderPager(d.page || 1, d.pages || 1, d.total || 0, _lastDedupRemoved);
+    loadSummary();
+  } catch(e) {
+    tbody.innerHTML = `<tr class="loading-row"><td colspan="14" style="color:var(--err)">Error: ${e.message}</td></tr>`;
+  }
+}
+
+function normKeyPart(v) {
+  return String(v || '')
+    .toLowerCase()
+    .replace(/mother vessel\s*:/g, ' ')
+    .replace(/lighter vessel\s*:/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function dedupeRosterItems(items) {
+  const seenVesselDate = new Set();
+  const seenVesselEscortDate = new Set();
+  const keep = [];
+  let removed = 0;
+
+  for (const r of items) {
+    const mv = normKeyPart(r.mother_vessel);
+    const lv = normKeyPart(r.lighter_vessel);
+    const en = normKeyPart(r.escort_name);
+    const dt = String(r.start_date || r.display_date || '').slice(0, 10);
+
+    // No key fields => cannot dedupe reliably; keep the row.
+    if (!mv || !lv || !dt) {
+      keep.push(r);
+      continue;
+    }
+
+    const vesselDateKey = `${mv}|${lv}|${dt}`;
+    const vesselEscortDateKey = `${mv}|${lv}|${en}|${dt}`;
+    if (seenVesselDate.has(vesselDateKey) || (en && seenVesselEscortDate.has(vesselEscortDateKey))) {
+      removed += 1;
+      continue;
+    }
+
+    seenVesselDate.add(vesselDateKey);
+    if (en) seenVesselEscortDate.add(vesselEscortDateKey);
+    keep.push(r);
+  }
+
+  _lastDedupRemoved = removed;
+  return keep;
+}
+
+function renderRosterRows(items) {
+  const tbody = document.getElementById('rosterBody');
+  if (!items.length) {
+    tbody.innerHTML = '<tr class="loading-row"><td colspan="14" style="color:var(--muted)">No records found</td></tr>';
+    return;
+  }
+  tbody.innerHTML = items.map(r => {
+    const _opStatus = r.program_status || r.roster_status || 'draft';
+    const sc = {
+      draft:'s-draft', confirmed:'s-confirmed',
+      Running:'s-active', Assigned:'s-assigned',
+      Completed:'s-completed', cancelled:'s-cancelled',
+      active:'s-active', completed:'s-completed', paid:'s-paid',
+      escort_changed:'s-changed'
+    }[_opStatus] || 's-draft';
+    const _statusLabel = r.program_status || r.roster_status || '—';
+    const fmt = v => v != null ? parseFloat(v).toLocaleString('en-BD') : '—';
+    const fmtDays = v => v != null ? parseFloat(v).toFixed(1) : '—';
+    const startDate = r.start_date || r.display_date || '—';
+    return `<tr${r.is_historical ? ' title="Historical record"' : ''}>
+      <td style="color:var(--muted);font-size:12px">${r.program_id}${r.is_historical ? ' <small style="color:#94a3b8">H</small>' : ''}</td>
+      <td style="font-weight:600">${esc(r.mother_vessel||'—')}</td>
+      <td>${esc(r.lighter_vessel||'—')}</td>
+      <td class="phones">${r.master_mobile?`<a href="tel:+88${r.master_mobile}" title="Master: ${r.master_mobile}" class="ph-ico">📱</a>`:''}
+          ${r.escort_mobile?`<a href="tel:+88${r.escort_mobile}" title="Escort: ${r.escort_mobile}" class="ph-ico">📞</a>`:(!r.master_mobile?'—':'')}</td>
+      <td>${esc(r.escort_name||'—')}</td>
+      <td>${startDate}${r.start_shift?' <small style="color:var(--muted)">('+r.start_shift+')</small>':''}</td>
+      <td>${r.end_date||'—'}${r.end_shift?' <small style="color:var(--muted)">('+r.end_shift+')</small>':''}</td>
+      <td class="num">${fmtDays(r.total_days)}</td>
+      <td class="num">${r.salary != null ? '৳'+fmt(r.salary) : '—'}</td>
+      <td style="font-size:12px">${esc(r.release_point||'—')}</td>
+      <td class="num">${r.conveyance != null ? '৳'+fmt(r.conveyance) : '—'}</td>
+      <td class="num" style="font-weight:700;color:var(--accent)">${r.total != null ? '৳'+fmt(r.total) : '—'}</td>
+      <td class="num" style="font-size:12px;color:${(r.roster_status==='completed'&&r.net_payable>0)?'#27ae60':'var(--muted)'}">${(r.roster_status==='completed'&&r.net_payable>0) ? '৳'+fmt(r.net_payable) : '—'}</td>
+      <td><span class="status-badge ${sc}">${_statusLabel}</span></td>
+      <td class="actions">
+        <button class="btn-icon" title="View details" onclick="openDetail(${r.program_id})">🔍</button>
+        <button class="btn-icon" title="Edit" onclick="openEdit(${JSON.stringify(r).replace(/"/g,'&quot;')})">✏️</button>
+        ${canDirectDelete() ? `<button class="btn-icon" title="Delete" onclick="deleteProgram(${r.program_id})">🗑</button>` : ''}
+        <button class="btn-icon" title="Recalculate" onclick="recalc(${r.program_id})">⟳</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+function renderPager(page, pages, total, dedupRemoved=0) {
+  const pager = document.getElementById('pager');
+  pager.innerHTML = '';
+  if (pages <= 1) return;
+  const add = (label, pg, current=false, disabled=false) => {
+    const b = document.createElement('button');
+    b.innerHTML = label;
+    if (current) b.classList.add('current');
+    b.disabled = disabled;
+    if (!disabled && !current) b.onclick = () => loadRoster(pg);
+    pager.appendChild(b);
+  };
+  add('«', 1, false, page===1);
+  add('‹', page-1, false, page===1);
+  const start = Math.max(1, page-2), end = Math.min(pages, page+2);
+  for (let i=start; i<=end; i++) add(i, i, i===page);
+  add('›', page+1, false, page===pages);
+  add('»', pages, false, page===pages);
+  const sp = document.createElement('span');
+  const dedupText = dedupRemoved > 0 ? ` · hidden duplicates ${dedupRemoved}` : '';
+  sp.textContent = `${total} records · Page ${page} of ${pages}${dedupText}`;
+  pager.appendChild(sp);
+}
+
+function setSort(col) {
+  if (_sortBy === col) { _sortDir = _sortDir==='asc' ? 'desc' : 'asc'; }
+  else { _sortBy = col; _sortDir = 'desc'; }
+  loadRoster(1);
+}
+
+function esc(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Export CSV
+// ─────────────────────────────────────────────────────────────────────────
+function exportCSV() {
+  const search = document.getElementById('searchInput').value.trim();
+  const status = document.getElementById('statusFilter').value;
+  const startFrom = document.getElementById('startFrom').value;
+  const startTo = document.getElementById('startTo').value;
+  const params = new URLSearchParams();
+  if (search) params.set('search', search);
+  if (status) params.set('status', status);
+  if (startFrom) params.set('start_from', startFrom);
+  if (startTo) params.set('start_to', startTo);
+  const url = `/api/escort-roster/export?${params.toString()}`;
+  const a = document.createElement('a');
+  a.href = url;
+  a.setAttribute('download','escort_roster.csv');
+  // Must pass auth — use fetch and blob
+  apiFetch(url).then(async r => {
+    if (!r.ok) throw new Error(await readApiError(r));
+    return r.blob();
+  }).then(blob => {
+    a.href = URL.createObjectURL(blob);
+    a.click();
+    toast('CSV export downloaded');
+  }).catch(e => toast('Export failed: '+e.message, 'err'));
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Detail Panel
+// ─────────────────────────────────────────────────────────────────────────
+async function openDetail(pid) {
+  document.getElementById('detailPanel').classList.add('open');
+  document.getElementById('panelTitle').textContent = `Program #${pid}`;
+  document.getElementById('panelBody').innerHTML = '<span class="spinner"></span>';
+  try {
+    const d = await apiGet(`/api/escort-roster/${pid}`);
+    document.getElementById('panelBody').innerHTML = renderDetail(d);
+  } catch(e) {
+    document.getElementById('panelBody').innerHTML = `<p style="color:var(--err)">Error: ${e.message}</p>`;
+  }
+}
+
+function closeDetail() { document.getElementById('detailPanel').classList.remove('open'); }
+
+function renderDetail(d) {
+  const fmt = v => v != null ? '৳ ' + parseFloat(v).toLocaleString('en-BD') : '—';
+  const fmtDays = v => v != null ? parseFloat(v).toFixed(1) + ' days' : '—';
+  const _opStatus = d.program_status || d.roster_status || 'draft';
+  const sc = {
+    draft:'s-draft', confirmed:'s-confirmed',
+    Running:'s-active', Assigned:'s-assigned',
+    Completed:'s-completed', cancelled:'s-cancelled',
+    active:'s-active', completed:'s-completed', paid:'s-paid',
+    escort_changed:'s-changed'
+  }[_opStatus] || 's-draft';
+  const _statusLabel = d.program_status || d.roster_status || '—';
+
+  let html = `
+  <div class="detail-section">
+    <h4>Program Overview</h4>
+    <div class="kv-grid">
+      <div class="kv"><label>Mother Vessel</label><span>${esc(d.mother_vessel||'—')}</span></div>
+      <div class="kv"><label>Lighter Vessel</label><span>${esc(d.lighter_vessel||'—')}</span></div>
+      <div class="kv"><label>Master Mobile</label><span>${esc(d.master_mobile||'—')}</span></div>
+      <div class="kv"><label>Escort Name</label><span>${esc(d.escort_name||'—')}</span></div>
+      <div class="kv"><label>Escort Mobile</label><span>${esc(d.escort_mobile||'—')}</span></div>
+      <div class="kv"><label>Destination</label><span>${esc(d.destination||'—')}</span></div>
+      <div class="kv"><label>Status</label><span class="status-badge ${sc}">${_statusLabel}</span></div>
+      <div class="kv"><label>Release Point</label><span>${esc(d.release_point||'—')}</span></div>
+    </div>
+  </div>
+  <div class="detail-section">
+    <h4>Shift & Pay</h4>
+    <div class="kv-grid">
+      <div class="kv"><label>Start</label><span>${d.start_date||'—'} ${d.start_shift||''}</span></div>
+      <div class="kv"><label>End</label><span>${d.end_date||'—'} ${d.end_shift||''}</span></div>
+      <div class="kv"><label>Total Shifts</label><span class="big">${d.total_shifts||'—'}</span></div>
+      <div class="kv"><label>Total Days</label><span class="big">${fmtDays(d.total_days)}</span></div>
+      <div class="kv"><label>Salary</label><span>${fmt(d.salary)}</span></div>
+      <div class="kv"><label>Conveyance</label><span>${fmt(d.conveyance)}</span></div>
+      <div class="kv" style="grid-column:span 2"><label>Total Payable</label><span class="big">${fmt(d.total)}</span></div>
+    </div>
+  </div>`;
+
+  if (d.audit_log && d.audit_log.length) {
+    html += `<div class="detail-section"><h4>Activity Log</h4><ul class="timeline">`;
+    d.audit_log.forEach(a => {
+      html += `<li><span class="tl-time">${(a.created_at||'').replace('T',' ').slice(0,16)}</span>
+        <span class="tl-text"><strong>${esc(a.action)}</strong> by ${esc(a.performed_by||'system')}</span></li>`;
+    });
+    html += '</ul></div>';
+  }
+
+  if (d.slip_matches && d.slip_matches.length) {
+    html += `<div class="detail-section"><h4>OCR Slip Matches</h4>`;
+    d.slip_matches.forEach(m => {
+      const conf = parseFloat(m.match_confidence||0);
+      const cc = conf>0.6?'conf-high':conf>0.3?'conf-med':'conf-low';
+      html += `<div class="slip-card">
+        <span class="conf-badge ${cc}">${Math.round(conf*100)}%</span>
+        <div>
+          <div style="font-size:13px;font-weight:600">Extraction #${m.extraction_id||'?'}</div>
+          <div style="font-size:12px;color:var(--muted)">Matched: ${esc((m.matched_fields||[]).join(', '))||'none'}</div>
+          <div style="font-size:12px;color:var(--muted)">Action: ${m.admin_action||'pending'}</div>
+        </div>
+      </div>`;
+    });
+    html += '</div>';
+  }
+
+  html += `<div style="margin-top:16px;display:flex;gap:10px">
+    <button class="btn btn-secondary btn-sm" onclick="openEdit(${JSON.stringify({program_id:d.program_id,mother_vessel:d.mother_vessel,lighter_vessel:d.lighter_vessel,master_mobile:d.master_mobile,escort_name:d.escort_name,escort_mobile:d.escort_mobile,start_date:d.start_date,start_shift:d.start_shift,end_date:d.end_date,end_shift:d.end_shift,release_point:d.release_point,conveyance:d.conveyance,roster_status:d.roster_status,program_status:d.program_status,notes:d.notes}).replace(/"/g,'&quot;')})">✏️ Edit</button>
+    <button class="btn btn-secondary btn-sm" onclick="recalc(${d.program_id})">⟳ Recalculate</button>
+  </div>`;
+
+  return html;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Edit / Add Modal
+// ─────────────────────────────────────────────────────────────────────────
+let _editMode = 'edit'; // 'edit' | 'add'
+
+function openEdit(data) {
+  if (typeof data === 'string') data = JSON.parse(data);
+  _editMode = 'edit';
+  document.getElementById('editModalTitle').textContent = '✏️ Edit Roster Entry';
+  document.getElementById('editSaveBtn').textContent = 'Save Changes';
+  document.getElementById('editProgramId').value = data.program_id;
+  document.getElementById('editMotherVessel').value = data.mother_vessel || '';
+  document.getElementById('editLighterVessel').value = data.lighter_vessel || '';
+  document.getElementById('editMasterMobile').value = data.master_mobile || '';
+  document.getElementById('editEscortName').value = data.escort_name || '';
+  document.getElementById('editEscortMobile').value = data.escort_mobile || '';
+  document.getElementById('editStartDate').value = data.start_date || '';
+  document.getElementById('editStartShift').value = data.start_shift || 'D';
+  document.getElementById('editEndDate').value = data.end_date || '';
+  document.getElementById('editEndShift').value = data.end_shift || 'N';
+  document.getElementById('editReleasePoint').value = data.release_point || '';
+  document.getElementById('editConveyance').value = data.conveyance || 0;
+  document.getElementById('editStatus').value = data.roster_status || 'draft';
+  document.getElementById('editNotes').value = data.notes || '';
+  // Show Delete Draft button only for draft programs
+  document.getElementById('editDeleteBtn').style.display = canDirectDelete() ? 'inline-flex' : 'none';
+  document.getElementById('editDeleteBtn').textContent = canDirectDelete() ? '🗑 Delete Program' : '🗑 Request Delete';
+  document.getElementById('editModal').classList.add('show');
+  wireEscortNameLookup();
+}
+
+// ── Escort Name typeahead (reuses /admin/attendance/lookup/suggest — the
+// wbom_employees-domain lookup, same auth as this page already uses) ──────
+let _escortSuggestItems = [];
+let _escortSuggestTimer = null;
+
+function wireEscortNameLookup() {
+  const input = document.getElementById('editEscortName');
+  if (!input || input._wired) return;
+  input._wired = true;
+  input.addEventListener('input', () => {
+    clearTimeout(_escortSuggestTimer);
+    const drop = document.getElementById('editEscortNameDrop');
+    const q = input.value.trim();
+    if (!q || q.length < 2) { if (drop) drop.classList.remove('open'); return; }
+    _escortSuggestTimer = setTimeout(async () => {
+      try {
+        const data = await apiGet('/admin/attendance/lookup/suggest?q=' + encodeURIComponent(q) + '&limit=8');
+        _escortSuggestItems = data.results || [];
+        if (!drop) return;
+        drop.innerHTML = _escortSuggestItems.length
+          ? _escortSuggestItems.map((e, i) => `<div class="suggest-row" onmousedown="event.preventDefault();pickEscortSuggest(${i})">
+              <div class="name">${esc(e.employee_name || '')}</div>
+              <div class="meta">${esc(e.employee_mobile || e.employee_id_phone || '')}</div>
+            </div>`).join('')
+          : '<div class="suggest-row" style="color:var(--muted)">No matches — you can still type a new name</div>';
+        drop.classList.add('open');
+      } catch (_) { /* typeahead is a convenience; ignore errors silently */ }
+    }, 280);
+  });
+  input.addEventListener('blur', () => setTimeout(() => {
+    const drop = document.getElementById('editEscortNameDrop');
+    if (drop) drop.classList.remove('open');
+  }, 200));
+}
+
+function pickEscortSuggest(idx) {
+  const e = _escortSuggestItems[idx];
+  if (!e) return;
+  document.getElementById('editEscortName').value = e.employee_name || '';
+  if (!document.getElementById('editEscortMobile').value.trim()) {
+    document.getElementById('editEscortMobile').value = e.employee_mobile || e.employee_id_phone || '';
+  }
+  const drop = document.getElementById('editEscortNameDrop');
+  if (drop) drop.classList.remove('open');
+}
+
+function openAddProgram() {
+  _editMode = 'add';
+  document.getElementById('editModalTitle').textContent = '➕ Add New Program';
+  document.getElementById('editSaveBtn').textContent = 'Create Program';
+  document.getElementById('editDeleteBtn').style.display = 'none';
+  document.getElementById('editProgramId').value = '';
+  document.getElementById('editMotherVessel').value = '';
+  document.getElementById('editLighterVessel').value = '';
+  document.getElementById('editMasterMobile').value = '';
+  document.getElementById('editEscortName').value = '';
+  document.getElementById('editEscortMobile').value = '';
+  document.getElementById('editStartDate').value = '';
+  document.getElementById('editStartShift').value = 'D';
+  document.getElementById('editEndDate').value = '';
+  document.getElementById('editEndShift').value = 'N';
+  document.getElementById('editReleasePoint').value = '';
+  document.getElementById('editConveyance').value = 0;
+  document.getElementById('editStatus').value = 'draft';
+  document.getElementById('editNotes').value = '';
+  document.getElementById('editModal').classList.add('show');
+  wireEscortNameLookup();
+}
+
+function closeEdit() { document.getElementById('editModal').classList.remove('show'); }
+
+async function deleteDraft() {
+  const pid = parseInt(document.getElementById('editProgramId').value);
+  if (!pid) return;
+  if (!confirm(`Permanently delete draft program #${pid}? This cannot be undone.`)) return;
+  try {
+    const res = await fetch(`/api/escort-roster/${pid}`, {
+      method: 'DELETE',
+      headers: {'X-Internal-Key': API_KEY}
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+    toast(`Draft #${pid} deleted`);
+    closeEdit();
+    loadRoster();
+    loadSummary();
+  } catch(e) { toast(e.message || 'Delete failed', 'err'); }
+}
+
+async function saveEdit() {
+  const mv = document.getElementById('editMotherVessel').value.trim();
+  if (_editMode === 'add' && !mv) { toast('Mother Vessel is required', 'err'); return; }
+
+  const body = {};
+  if (mv) body.mother_vessel = mv;
+  const lv = document.getElementById('editLighterVessel').value.trim();
+  if (lv) body.lighter_vessel = lv;
+  const mm = document.getElementById('editMasterMobile').value.trim();
+  if (mm) body.master_mobile = mm;
+  const en = document.getElementById('editEscortName').value.trim();
+  if (en) body.escort_name = en;
+  const em = document.getElementById('editEscortMobile').value.trim();
+  if (em) body.escort_mobile = em;
+
+  const sd = document.getElementById('editStartDate').value;
+  const ed = document.getElementById('editEndDate').value;
+  if (sd) body.start_date = sd;
+  if (ed) body.end_date = ed;
+  body.start_shift = document.getElementById('editStartShift').value;
+  body.end_shift = document.getElementById('editEndShift').value;
+  const rp = document.getElementById('editReleasePoint').value.trim();
+  if (rp) body.release_point = rp;
+  const cv = document.getElementById('editConveyance').value;
+  if (cv !== '') body.conveyance = parseFloat(cv);
+  body.roster_status = document.getElementById('editStatus').value;
+  const notes = document.getElementById('editNotes').value.trim();
+  if (notes) body.notes = notes;
+
+  try {
+    if (_editMode === 'add') {
+      await apiPost('/api/escort-roster', body);
+      toast('Program created');
+    } else {
+      const pid = parseInt(document.getElementById('editProgramId').value);
+      const result = await apiPatch(`/api/escort-roster/${pid}`, body);
+      if (result && result.status === 'pending_approval') {
+        toast('Edit submitted for admin approval');
+      } else {
+        toast('Entry updated');
+      }
+    }
+    closeEdit();
+    loadRoster();
+    loadSummary();
+  } catch(e) { toast((_editMode==='add'?'Create':'Save')+' failed: '+e.message, 'err'); }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Recalculate
+// ─────────────────────────────────────────────────────────────────────────
+async function recalc(pid) {
+  try {
+    await apiPost(`/api/escort-roster/${pid}/recalculate`, {});
+    toast(`Program #${pid} recalculated`);
+    loadRoster();
+  } catch(e) { toast('Recalc failed: '+e.message, 'err'); }
+}
+
+function canDirectDelete() {
+  const roles = normalizedSessionRoles();
+  return roles.includes('admin') || roles.includes('superadmin') || roles.includes('owner');
+}
+
+async function adminApi(path, opts={}) {
+  const method = (opts.method || 'GET').toUpperCase();
+  const hdr = {'X-Internal-Key': API_KEY, ...(opts.headers || {})};
+  const init = {method, headers: hdr};
+  if (opts.body !== undefined) {
+    init.headers['Content-Type'] = 'application/json';
+    init.body = JSON.stringify(opts.body);
+  }
+  const res = await fetch('/admin' + path, init);
+  if (!res.ok) {
+    throw new Error(await readApiError(res));
+  }
+  return res.json();
+}
+
+function adminRoleDisplay(user) {
+  const roles = String(user.roles || '').split(',').map(s => s.trim()).filter(Boolean);
+  return roles[0] || 'viewer';
+}
+
+function renderAdminUsersRows(rows) {
+  const canSuper = isSuperAdminRoster();
+  const tbody = document.getElementById('adminUsersBody');
+  if (!tbody) return;
+  if (!rows.length) {
+    tbody.innerHTML = '<tr class="loading-row"><td colspan="7" style="color:var(--muted)">No users found</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map((u) => {
+    const phone = String(u.phone || '');
+    const role = adminRoleDisplay(u);
+    const status = String(u.status || '—');
+    const statusClass = status === 'active' ? 's-active' : 's-cancelled';
+    return `<tr>
+      <td>${esc(u.name || '—')}</td>
+      <td>${esc(phone || '—')}</td>
+      <td>${esc(u.username || '—')}</td>
+      <td><span class="status-badge ${statusClass}">${esc(status)}</span></td>
+      <td>${esc(role)}</td>
+      <td>${esc(u.last_seen_at || 'never')}</td>
+      <td class="actions">
+        <button class="icon-btn" title="View" onclick="openAdminUserModal('${encodeURIComponent(phone)}', true)">👁️</button>
+        ${canSuper ? `<button class="icon-btn" title="Edit" onclick="openAdminUserModal('${encodeURIComponent(phone)}', false)">✏️</button>` : ''}
+        ${canSuper ? `<button class="icon-btn warn" title="Reset Login" onclick="adminResetLoginRoster('${encodeURIComponent(phone)}')">🔑</button>` : ''}
+        ${canSuper && status === 'disabled' ? `<button class="icon-btn" title="Activate" onclick="adminActivateRoster('${encodeURIComponent(phone)}')">✅</button>` : ''}
+        ${canSuper && status === 'active' ? `<button class="icon-btn danger" title="Deactivate" onclick="adminDeactivateRoster('${encodeURIComponent(phone)}')">🗑️</button>` : ''}
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function loadAdminUsersRoster() {
+  if (!canAccessAdminRosterTab()) return;
+  const tbody = document.getElementById('adminUsersBody');
+  if (!tbody) return;
+  tbody.innerHTML = '<tr class="loading-row"><td colspan="7"><span class="spinner"></span> Loading…</td></tr>';
+  try {
+    const res = await adminApi('/users');
+    const rows = Array.isArray(res.users) ? res.users : [];
+    const q = (document.getElementById('adminUserSearch')?.value || '').trim().toLowerCase();
+    _adminUsersCache = rows;
+    const filtered = rows.filter((u) => {
+      if (!q) return true;
+      const text = `${u.name || ''} ${u.phone || ''} ${u.username || ''}`.toLowerCase();
+      return text.includes(q);
+    });
+    renderAdminUsersRows(filtered);
+  } catch (e) {
+    tbody.innerHTML = `<tr class="loading-row"><td colspan="7" style="color:var(--err)">${esc(e.message || 'Failed')}</td></tr>`;
+  }
+}
+
+function openAdminUserModal(encodedPhone, viewOnly=false) {
+  if (!isSuperAdminRoster() && !viewOnly) {
+    toast('Super admin only', 'err');
+    return;
+  }
+  const modal = document.getElementById('adminUserModal');
+  const title = document.getElementById('adminUserModalTitle');
+  const saveBtn = document.getElementById('adminUserSaveBtn');
+  const originalPhone = document.getElementById('adminEditPhoneOriginal');
+  originalPhone.value = '';
+
+  const setReadonly = (flag) => {
+    ['adminUserName','adminUserPhone','adminUserRole','adminUserUsername','adminUserPassword','adminUserStatus'].forEach((id) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      if (el.tagName === 'SELECT') el.disabled = flag;
+      else el.readOnly = flag;
+    });
+    saveBtn.style.display = flag ? 'none' : '';
+  };
+
+  if (!encodedPhone) {
+    title.textContent = '👤 Add Admin User';
+    document.getElementById('adminUserName').value = '';
+    document.getElementById('adminUserPhone').value = '';
+    document.getElementById('adminUserRole').value = 'viewer';
+    document.getElementById('adminUserUsername').value = '';
+    document.getElementById('adminUserPassword').value = '';
+    document.getElementById('adminUserStatus').value = 'active';
+    setReadonly(false);
+    modal.classList.add('show');
+    return;
+  }
+
+  const phone = decodeURIComponent(encodedPhone);
+  const user = _adminUsersCache.find((u) => String(u.phone || '') === phone);
+  if (!user) {
+    toast('User not found', 'err');
+    return;
+  }
+  title.textContent = viewOnly ? `👁️ View User: ${user.name || phone}` : `✏️ Edit User: ${user.name || phone}`;
+  originalPhone.value = phone;
+  document.getElementById('adminUserName').value = user.name || '';
+  document.getElementById('adminUserPhone').value = user.phone || '';
+  document.getElementById('adminUserRole').value = adminRoleDisplay(user);
+  document.getElementById('adminUserUsername').value = user.username || '';
+  document.getElementById('adminUserPassword').value = '';
+  document.getElementById('adminUserStatus').value = user.status || 'active';
+  setReadonly(!!viewOnly);
+  modal.classList.add('show');
+}
+
+function closeAdminUserModal() {
+  document.getElementById('adminUserModal').classList.remove('show');
+}
+
+async function saveAdminUser() {
+  if (!isSuperAdminRoster()) {
+    toast('Super admin only', 'err');
+    return;
+  }
+  const originalPhone = (document.getElementById('adminEditPhoneOriginal').value || '').trim();
+  const name = (document.getElementById('adminUserName').value || '').trim();
+  const phone = (document.getElementById('adminUserPhone').value || '').trim();
+  const role = (document.getElementById('adminUserRole').value || 'viewer').trim();
+  const username = (document.getElementById('adminUserUsername').value || '').trim();
+  const password = document.getElementById('adminUserPassword').value || '';
+  const status = (document.getElementById('adminUserStatus').value || 'active').trim();
+
+  if (!name || !phone) {
+    toast('Name and mobile are required', 'err');
+    return;
+  }
+
+  try {
+    if (!originalPhone) {
+      const body = {phone, name, role};
+      if (username) body.username = username;
+      if (password) body.password = password;
+      await adminApi('/users', {method: 'POST', body});
+      toast('User created', 'ok');
+    } else {
+      const body = {phone, name, role, status};
+      if (username !== '') body.username = username;
+      if (password) body.password = password;
+      await adminApi('/users/' + encodeURIComponent(originalPhone), {method: 'PATCH', body});
+      toast('User updated', 'ok');
+    }
+    closeAdminUserModal();
+    await loadAdminUsersRoster();
+  } catch (e) {
+    toast(e.message || 'Save failed', 'err');
+  }
+}
+
+async function adminResetLoginRoster(encodedPhone) {
+  if (!isSuperAdminRoster()) {
+    toast('Super admin only', 'err');
+    return;
+  }
+  const phone = decodeURIComponent(encodedPhone || '');
+  if (!phone) return;
+  if (!confirm(`Reset login key for ${phone}?`)) return;
+  try {
+    const result = await adminApi('/users/' + encodeURIComponent(phone) + '/apikey', {method: 'POST'});
+    prompt('New login key (shown once):', result.api_key || '');
+    toast('Login key reset', 'ok');
+  } catch (e) {
+    toast(e.message || 'Reset failed', 'err');
+  }
+}
+
+async function adminDeactivateRoster(encodedPhone) {
+  if (!isSuperAdminRoster()) {
+    toast('Super admin only', 'err');
+    return;
+  }
+  const phone = decodeURIComponent(encodedPhone || '');
+  if (!phone) return;
+  if (!confirm(`Deactivate ${phone}?`)) return;
+  try {
+    await adminApi('/users/' + encodeURIComponent(phone) + '/disable', {method: 'POST'});
+    toast('User deactivated', 'ok');
+    await loadAdminUsersRoster();
+  } catch (e) {
+    toast(e.message || 'Deactivate failed', 'err');
+  }
+}
+
+async function adminActivateRoster(encodedPhone) {
+  if (!isSuperAdminRoster()) {
+    toast('Super admin only', 'err');
+    return;
+  }
+  const phone = decodeURIComponent(encodedPhone || '');
+  if (!phone) return;
+  if (!confirm(`Activate ${phone}?`)) return;
+  try {
+    await adminApi('/users/' + encodeURIComponent(phone) + '/enable', {method: 'POST'});
+    toast('User activated', 'ok');
+    await loadAdminUsersRoster();
+  } catch (e) {
+    toast(e.message || 'Activate failed', 'err');
+  }
+}
+
+async function deleteProgram(pid) {
+  if (!pid) return;
+  const confirmMsg = canDirectDelete()
+    ? `Permanently delete program #${pid}? This cannot be undone.`
+    : `Submit delete request for program #${pid}?`;
+  if (!confirm(confirmMsg)) return;
+  try {
+    const res = await fetch(`/api/escort-roster/${pid}`, {
+      method: 'DELETE',
+      headers: {'X-Internal-Key': API_KEY},
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+    const data = await res.json().catch(() => ({}));
+    if (data && data.status === 'pending_approval') {
+      toast('Delete submitted for admin approval');
+    } else {
+      toast('Program deleted');
+    }
+    closeEdit();
+    loadRoster();
+    loadSummary();
+  } catch (e) {
+    toast(e.message || 'Delete failed', 'err');
+  }
+}
+
+async function loadAttendance() {
+  const tbody = document.getElementById('attendanceBody');
+  if (!tbody) return;
+  const q = (document.getElementById('attendanceSearch')?.value || '').trim().toLowerCase();
+  try {
+    const d = await apiGet('/api/escort-roster?page=1&page_size=200&sort_by=start_date&sort_dir=desc');
+    const items = (d.items || []).filter((r) => {
+      if (!q) return true;
+      const text = `${r.escort_name || ''} ${r.escort_mobile || ''} ${r.mother_vessel || ''}`.toLowerCase();
+      return text.includes(q);
+    });
+    tbody.innerHTML = items.map((r) => `
+      <tr>
+        <td>#${r.program_id}</td>
+        <td>${esc(r.escort_name || '—')}</td>
+        <td>${esc(r.escort_mobile || '—')}</td>
+        <td>${esc(r.start_date || '—')} ${esc(r.start_shift || '')}</td>
+        <td>${esc(r.end_date || '—')} ${esc(r.end_shift || '')}</td>
+        <td class="num">${r.total_days != null ? Number(r.total_days).toFixed(1) : '—'}</td>
+      </tr>
+    `).join('') || '<tr class="loading-row"><td colspan="6" style="color:var(--muted)">No attendance rows</td></tr>';
+  } catch (e) {
+    tbody.innerHTML = `<tr class="loading-row"><td colspan="6" style="color:var(--err)">${esc(e.message || 'Failed')}</td></tr>`;
+  }
+}
+
+async function loadNetSalary() {
+  const tbody = document.getElementById('netSalaryBody');
+  if (!tbody) return;
+  const q = (document.getElementById('netSalarySearch')?.value || '').trim().toLowerCase();
+  try {
+    const d = await apiGet('/api/escort-roster?page=1&page_size=200&sort_by=start_date&sort_dir=desc');
+    const items = (d.items || []).filter((r) => {
+      if (!q) return true;
+      const text = `${r.escort_name || ''} ${r.mother_vessel || ''} ${r.lighter_vessel || ''}`.toLowerCase();
+      return text.includes(q);
+    });
+    const amt = (v) => v == null ? '—' : '৳ ' + Number(v).toLocaleString('en-BD');
+    tbody.innerHTML = items.map((r) => `
+      <tr>
+        <td>#${r.program_id}</td>
+        <td>${esc(r.mother_vessel || '—')}</td>
+        <td>${esc(r.escort_name || '—')}</td>
+        <td class="num">${amt(r.total)}</td>
+        <td class="num">${amt(r.food_bill)}</td>
+        <td class="num" style="font-weight:700;color:var(--accent)">${amt(r.net_payable)}</td>
+      </tr>
+    `).join('') || '<tr class="loading-row"><td colspan="6" style="color:var(--muted)">No net salary rows</td></tr>';
+  } catch (e) {
+    tbody.innerHTML = `<tr class="loading-row"><td colspan="6" style="color:var(--err)">${esc(e.message || 'Failed')}</td></tr>`;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Sync All
+// ─────────────────────────────────────────────────────────────────────────
+async function triggerSyncAll() {
+  const btn = document.querySelector('header .btn-sm');
+  const orig = btn.textContent;
+  btn.textContent = '…';
+  btn.disabled = true;
+  try {
+    const r = await apiPost('/api/escort-roster/sync-all', {});
+    toast(`Synced ${r.synced} programs (${(r.errors||[]).length} errors)`);
+    loadRoster(); loadSummary();
+  } catch(e) { toast('Sync failed: '+e.message,'err'); }
+  finally { btn.textContent = orig; btn.disabled = false; }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// History Sync
+// ─────────────────────────────────────────────────────────────────────────
+async function triggerSyncHistory() {
+  const btns = document.querySelectorAll('header .btn-sm');
+  const btn = btns[btns.length - 1];
+  const orig = btn.textContent;
+  btn.textContent = '⏳';
+  btn.disabled = true;
+  try {
+    const r = await apiPost('/api/escort-roster/sync-history', {});
+    toast(`History sync: ${r.groups_created||0} groups, ${r.lighters_created||0} lighters, ${r.matched||0} matched`);
+    loadRoster(); loadSummary();
+  } catch(e) { toast('History sync failed: '+e.message,'err'); }
+  finally { btn.textContent = orig; btn.disabled = false; }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Kanban
+// ─────────────────────────────────────────────────────────────────────────
+async function loadKanban() {
+  const board = document.getElementById('kanbanBoard');
+  board.innerHTML = '<span class="spinner"></span>';
+  try {
+    const d = await apiGet('/api/escort-roster?page=1&page_size=200&sort_by=start_date&sort_dir=desc');
+    const items = dedupeRosterItems(Array.isArray(d.items) ? d.items : []);
+    const cols = {draft:[], confirmed:[], Running:[], Assigned:[], Completed:[], cancelled:[]};
+    items.forEach(r => {
+      const st = r.program_status || r.roster_status || 'draft';
+      if (cols[st]) cols[st].push(r); else cols['draft'].push(r);
+    });
+    const labels = {draft:'📝 Pending', confirmed:'✔ Confirmed', Running:'▶ Running', Assigned:'🚢 Assigned', Completed:'✅ Completed', cancelled:'✕ Cancelled'};
+    board.innerHTML = Object.entries(cols).map(([st, items]) => `
+      <div class="kb-col">
+        <div class="kb-hdr h-${st}"><span>${labels[st]||st}</span><span>${items.length}</span></div>
+        <div class="kb-body">
+          ${items.length ? items.map(r => `
+            <div class="kb-card" onclick="openDetail(${r.program_id})">
+              <div class="kbc-vessel">${esc(r.mother_vessel||'?')} / ${esc(r.lighter_vessel||'?')}</div>
+              <div class="kbc-meta">${esc(r.escort_name||'Unassigned')} · ${r.start_date||'?'}</div>
+              ${r.total != null ? `<div class="kbc-meta" style="font-weight:600;color:var(--accent)">৳ ${parseFloat(r.total).toLocaleString('en-BD')}</div>` : ''}
+            </div>`).join('') : '<div style="padding:10px;color:var(--muted);font-size:12px;text-align:center">Empty</div>'}
+        </div>
+      </div>`).join('');
+  } catch(e) { board.innerHTML = `<p style="color:var(--err)">${e.message}</p>`; }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Config
+// ─────────────────────────────────────────────────────────────────────────
+async function loadConfig() {
+  try {
+    const rows = await apiGet('/api/escort-roster/config');
+    const tbody = document.getElementById('configBody');
+    tbody.innerHTML = rows.map(r => `<tr>
+      <td>${esc(r.destination)}</td>
+      <td class="num">৳ ${parseFloat(r.conveyance_amount).toLocaleString('en-BD')}</td>
+      <td class="num">৳ ${parseFloat(r.shift_rate).toLocaleString('en-BD')}</td>
+      <td style="font-size:11px;color:var(--muted)">${r.updated_at ? r.updated_at.slice(0,16) : '—'}</td>
+    </tr>`).join('') || '<tr><td colspan="4" style="color:var(--muted);text-align:center">No config</td></tr>';
+  } catch(e) { document.getElementById('configBody').innerHTML = `<tr><td colspan="4" style="color:var(--err)">${e.message}</td></tr>`; }
+}
+
+async function loadEscortClients() {
+  const tbody = document.getElementById('escortClientBody');
+  tbody.innerHTML = '<tr class="loading-row"><td colspan="2"><span class="spinner"></span></td></tr>';
+  try {
+    const data = await apiGet('/api/escort-roster/escort-clients');
+    const items = data.phones || [];
+    tbody.innerHTML = items.map(phone => `<tr>
+      <td>${esc(phone)}</td>
+      <td class="actions"><button class="btn btn-danger btn-sm" onclick="removeEscortClient('${phone}')">Remove</button></td>
+    </tr>`).join('') || '<tr><td colspan="2" style="color:var(--muted);text-align:center">No escort clients configured</td></tr>';
+  } catch(e) {
+    tbody.innerHTML = `<tr><td colspan="2" style="color:var(--err)">${e.message}</td></tr>`;
+  }
+}
+
+async function addEscortClient() {
+  const input = document.getElementById('escortClientInput');
+  const phone = input.value.trim();
+  if (!phone) { toast('Enter a client phone', 'warn'); return; }
+  try {
+    await apiPost('/api/escort-roster/escort-clients', {phone});
+    input.value = '';
+    toast('Escort client added');
+    loadEscortClients();
+  } catch(e) { toast('Add failed: ' + e.message, 'err'); }
+}
+
+async function removeEscortClient(phone) {
+  if (!confirm(`Remove escort client ${phone}?`)) return;
+  try {
+    const res = await apiFetch(`/api/escort-roster/escort-clients/${encodeURIComponent(phone)}`, {method:'DELETE'});
+    if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
+    toast('Escort client removed');
+    loadEscortClients();
+  } catch(e) { toast('Remove failed: ' + e.message, 'err'); }
+}
+
+async function saveConfig() {
+  const dest = document.getElementById('cfgDest').value.trim();
+  const conv = parseFloat(document.getElementById('cfgConv').value) || 0;
+  const rate = parseFloat(document.getElementById('cfgRate').value) || 200;
+  if (!dest) { toast('Enter a destination', 'warn'); return; }
+  try {
+    await apiPost('/api/escort-roster/config', {destination: dest, conveyance_amount: conv, shift_rate: rate});
+    toast(`Config saved: ${dest}`);
+    loadConfig();
+  } catch(e) { toast('Save failed: '+e.message, 'err'); }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Shift Calculator
+// ─────────────────────────────────────────────────────────────────────────
+function calcShifts() {
+  const sd = document.getElementById('calcStartDate').value;
+  const ss = document.getElementById('calcStartShift').value;
+  const ed = document.getElementById('calcEndDate').value;
+  const es = document.getElementById('calcEndShift').value;
+  const rate = parseFloat(document.getElementById('calcRate').value) || 200;
+  const conv = parseFloat(document.getElementById('calcConveyance').value) || 0;
+
+  if (!sd || !ed) { toast('Enter start and end dates', 'warn'); return; }
+
+  const start = new Date(sd), end = new Date(ed);
+  if (end < start) { toast('End date must be after start date', 'warn'); return; }
+
+  // Replicate Python calculation in JS
+  const SHIFT_ORDER = ['D','N'];
+  function countShifts(sd, ss, ed, es) {
+    if (ed < sd) return 0;
+    const si = SHIFT_ORDER.indexOf(ss), ei_end = SHIFT_ORDER.indexOf(es);
+    if (sd.getTime() === ed.getTime()) {
+      return ei_end < si ? 0 : ei_end - si + 1;
+    }
+    let total = 2 - si;
+    const cur = new Date(sd); cur.setDate(cur.getDate()+1);
+    while (cur < ed) { total += 2; cur.setDate(cur.getDate()+1); }
+    total += ei_end + 1;
+    return total;
+  }
+
+  const shifts = countShifts(start, ss, end, es);
+  const days = shifts * 0.5;
+  const salary = shifts * rate;
+  const total = salary + conv;
+
+  const res = document.getElementById('calcResult');
+  res.style.display = 'block';
+  document.getElementById('cr-shifts').textContent = shifts;
+  document.getElementById('cr-days').textContent = days.toFixed(1);
+  document.getElementById('cr-salary').textContent = '৳ ' + salary.toLocaleString('en-BD');
+  document.getElementById('cr-conv').textContent = '৳ ' + conv.toLocaleString('en-BD');
+  document.getElementById('cr-total').textContent = '৳ ' + total.toLocaleString('en-BD');
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Auto-refresh
+// ─────────────────────────────────────────────────────────────────────────
+setInterval(() => {
+  if (API_KEY && document.getElementById('tab-roster').style.display !== 'none') {
+    loadSummary();
+    loadRoster(undefined, {silent: true});
+  }
+}, 60000);
+
+// ─────────────────────────────────────────────────────────────────────────
+// Slip Queue (Task 5d)
+// ─────────────────────────────────────────────────────────────────────────
+let slipQueuePage = 1;
+let slipQueuePages = 1;
+
+async function loadSlipQueue() {
+  const container = document.getElementById('slipQueue');
+  const pager = document.getElementById('slipQueuePager');
+  try {
+    const d = await apiGet(`/api/escort-roster/slip-queue?page=${slipQueuePage}&page_size=25`);
+    slipQueuePages = d.pages || 1;
+    if (!d.items || d.items.length === 0) {
+      container.innerHTML = '<p style="color:var(--muted);padding:16px">✅ No pending slip reviews</p>';
+      pager.style.display = 'none';
+      return;
+    }
+    pager.style.display = '';
+    document.getElementById('slipPageInfo').textContent = `Page ${d.page} of ${d.pages} (${d.total} total)`;
+    document.getElementById('slipPrevBtn').disabled = d.page <= 1;
+    document.getElementById('slipNextBtn').disabled = d.page >= d.pages;
+
+    container.innerHTML = d.items.map(item => {
+      const conf = item.confidence != null ? (item.confidence * 100).toFixed(0) + '%' : '—';
+      const matchConf = item.match_confidence != null ? (item.match_confidence * 100).toFixed(0) + '%' : '—';
+      const docType = item.document_type || 'unknown';
+      const badgeColor = docType === 'printed_template_slip' ? '#27ae60' : docType === 'handwritten_blank_slip' ? '#e67e22' : '#95a5a6';
+      const rawText = item.raw_text ? item.raw_text.substring(0, 300).replace(/</g,'&lt;') : '';
+      const hasMatch = item.match_id != null;
+      const matchInfo = hasMatch ? `
+        <div style="margin-top:8px;padding:8px;background:#e8f5e9;border-radius:6px">
+          <strong>Matched Program #${item.program_id}</strong> (${matchConf} confidence)<br>
+          MV: ${item.prog_mv || '—'} | LV: ${item.prog_lv || '—'} | Escort: ${item.prog_escort_name || '—'} | Status: ${item.prog_status || '—'}<br>
+          <button onclick="confirmSlip(${item.match_id})" style="margin-top:4px;background:#27ae60;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer">✅ Confirm</button>
+          <button onclick="rejectSlip(${item.match_id})" style="margin-top:4px;background:#e74c3c;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer">❌ Reject</button>
+        </div>` : '<p style="color:var(--muted);margin-top:8px">No program match found — manual review needed</p>';
+      return `
+        <div style="border:1px solid #e0e0e0;border-radius:8px;padding:12px;margin-bottom:12px">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <span style="background:${badgeColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">${docType}</span>
+            <span style="color:var(--muted);font-size:12px">${item.created_at || ''} · OCR conf: ${conf}</span>
+          </div>
+          <div style="margin-top:8px">
+            <strong>MV:</strong> ${item.mother_vessel || '—'} |
+            <strong>LV:</strong> ${item.lighter_vessel || '—'} |
+            <strong>Escort:</strong> ${item.escort_name || '—'} ${item.escort_mobile || ''}<br>
+            <strong>Master:</strong> ${item.master_mobile || '—'} |
+            <strong>Start:</strong> ${item.start_date || '—'} |
+            <strong>Release:</strong> ${item.completion_date || '—'} @ ${item.release_place || '—'}
+          </div>
+          ${rawText ? `<details style="margin-top:8px"><summary style="cursor:pointer;color:var(--muted)">Raw OCR text</summary><pre style="font-size:11px;white-space:pre-wrap;background:#f9f9f9;padding:8px;border-radius:4px">${rawText}…</pre></details>` : ''}
+          ${matchInfo}
+        </div>`;
+    }).join('');
+  } catch(e) {
+    container.innerHTML = `<p style="color:#e74c3c;padding:16px">Error loading slip queue: ${e.message}</p>`;
+    pager.style.display = 'none';
+  }
+}
+
+async function confirmSlip(matchId) {
+  try {
+    await apiPost(`/api/escort-roster/slip-queue/${matchId}/confirm`, {});
+    toast('ok', 'Slip match confirmed');
+    loadSlipQueue();
+    loadSummary();
+  } catch(e) { toast('err', 'Confirm failed: ' + e.message); }
+}
+
+async function rejectSlip(matchId) {
+  try {
+    await apiPost(`/api/escort-roster/slip-queue/${matchId}/reject`, {});
+    toast('ok', 'Slip match rejected');
+    loadSlipQueue();
+    loadSummary();
+  } catch(e) { toast('err', 'Reject failed: ' + e.message); }
+}
+
+function slipQueuePrev() { if (slipQueuePage > 1) { slipQueuePage--; loadSlipQueue(); } }
+function slipQueueNext() { if (slipQueuePage < slipQueuePages) { slipQueuePage++; loadSlipQueue(); } }
+</script>
+</body>
+</html>

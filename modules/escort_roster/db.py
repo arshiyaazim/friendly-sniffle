@@ -1,0 +1,1892 @@
+"""
+Escort Roster — Database Layer
+
+Handles all DB operations for the escort_roster module:
+  - sync_program_to_roster()   — upsert a wbom_escort_programs row into escort_roster_entries
+  - sync_all_programs()        — bulk sync ALL programs (safe: idempotent)
+  - recalculate_entry()        — recompute pay for an existing roster entry
+  - get_roster_summary()       — aggregate stats
+  - get_roster_list()          — paginated, filtered list for API
+  - get_roster_detail()        — single program with slip matches
+  - update_roster_entry()      — partial update (inline edit)
+  - get_conveyance_config()    — read conveyance/rate table
+  - log_audit()                — append to escort_roster_audit_logs
+
+remarks TEXT column may contain: clean JSON, corrupted JSON (text appended),
+or plain text. All parsing must be fault-tolerant.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+from datetime import date
+from decimal import Decimal
+from typing import Any, Optional
+
+from app.config import get_settings
+from app.database import execute, fetch_all, fetch_one, fetch_val, get_pool
+from .calculations import calculate_pay, parse_date_shift
+
+log = logging.getLogger("fazle.escort_roster.db")
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ────────────────────────────────────────────────────────────────────────────
+
+def _safe_json(text: Optional[str]) -> dict:
+    """Parse a remarks TEXT column that may contain JSON or corrupted JSON."""
+    if not text:
+        return {}
+    raw = text.strip()
+    # Truncate at first non-JSON character after a closing brace
+    brace = raw.rfind("}")
+    if brace != -1:
+        raw = raw[: brace + 1]
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {}
+
+
+def _norm_dup_text(value: Optional[str]) -> str:
+    """Normalise vessel/escort text for duplicate checks."""
+    text = (value or "").strip().lower()
+    # Strip noisy prefixes often coming from OCR/admin-draft text.
+    text = text.replace("mother vessel:", " ").replace("lighter vessel:", " ")
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+async def _find_duplicate_roster_entry(
+    mother_vessel: Optional[str],
+    lighter_vessel: Optional[str],
+    start_date: Optional[date],
+    escort_name: Optional[str],
+    *,
+    exclude_program_id: Optional[int] = None,
+    conn=None,
+) -> Optional[dict]:
+    """
+    Detect same-day duplicate entries.
+    Rules:
+      1) same mother_vessel + lighter_vessel + date must be unique
+      2) same mother_vessel + lighter_vessel + escort_name + date must be unique
+    """
+    if not start_date:
+        return None
+
+    mv = _norm_dup_text(mother_vessel)
+    lv = _norm_dup_text(lighter_vessel)
+    if not mv or not lv:
+        return None
+
+    dup_primary = await fetch_one(
+        """
+        SELECT program_id, mother_vessel, lighter_vessel, escort_name, start_date
+        FROM escort_roster_entries
+        WHERE start_date = $1
+          AND LOWER(TRIM(COALESCE(mother_vessel, ''))) = $2
+          AND LOWER(TRIM(COALESCE(lighter_vessel, ''))) = $3
+          AND ($4::INT IS NULL OR program_id <> $4)
+        ORDER BY program_id DESC
+        LIMIT 1
+        """,
+        start_date,
+        mv,
+        lv,
+        exclude_program_id,
+        conn=conn,
+    )
+    if dup_primary:
+        return {"type": "vessel_date", **dict(dup_primary)}
+
+    en = _norm_dup_text(escort_name)
+    if not en:
+        return None
+
+    dup_with_escort = await fetch_one(
+        """
+        SELECT program_id, mother_vessel, lighter_vessel, escort_name, start_date
+        FROM escort_roster_entries
+        WHERE start_date = $1
+          AND LOWER(TRIM(COALESCE(mother_vessel, ''))) = $2
+          AND LOWER(TRIM(COALESCE(lighter_vessel, ''))) = $3
+          AND LOWER(TRIM(COALESCE(escort_name, ''))) = $4
+          AND ($5::INT IS NULL OR program_id <> $5)
+        ORDER BY program_id DESC
+        LIMIT 1
+        """,
+        start_date,
+        mv,
+        lv,
+        en,
+        exclude_program_id,
+        conn=conn,
+    )
+    if dup_with_escort:
+        return {"type": "vessel_escort_date", **dict(dup_with_escort)}
+
+    return None
+
+
+async def _get_conveyance_for_destination(destination: Optional[str], conn=None) -> Decimal:
+    """Look up conveyance amount for a destination key."""
+    if not destination:
+        return Decimal("0")
+    key = destination.strip().lower()
+    row = await fetch_one(
+        "SELECT conveyance_amount FROM escort_calculation_config WHERE destination_key = $1",
+        key,
+        conn=conn,
+    )
+    if row:
+        return Decimal(str(row["conveyance_amount"]))
+    # Fuzzy fallback: partial match
+    row = await fetch_one(
+        "SELECT conveyance_amount FROM escort_calculation_config "
+        "WHERE $1 ILIKE '%' || destination_key || '%' OR destination_key ILIKE '%' || $1 || '%' "
+        "ORDER BY LENGTH(destination_key) DESC LIMIT 1",
+        key,
+        conn=conn,
+    )
+    if row:
+        return Decimal(str(row["conveyance_amount"]))
+    return Decimal("0")
+
+
+async def _get_shift_rate(conn=None) -> Decimal:
+    """Default shift rate from config (uses first row's value)."""
+    val = await fetch_val(
+        "SELECT shift_rate FROM escort_calculation_config ORDER BY id LIMIT 1",
+        conn=conn,
+    )
+    return Decimal(str(val)) if val else Decimal("200")
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Shift log helper
+# ────────────────────────────────────────────────────────────────────────────
+
+async def _write_shift_log(
+    program_id: int,
+    shift_date: date,
+    shift: str,
+    log_type: str,
+    notes: Optional[str] = None,
+    recorded_by: str = "system",
+    conn=None,
+) -> None:
+    """Insert a shift log entry. ON CONFLICT DO NOTHING keeps it idempotent."""
+    try:
+        await execute(
+            """
+            INSERT INTO escort_shift_logs
+                (program_id, shift_date, shift, log_type, notes, recorded_by)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT DO NOTHING
+            """,
+            program_id,
+            shift_date,
+            (shift or "D").upper()[:1],
+            log_type,
+            notes,
+            recorded_by,
+            conn=conn,
+        )
+    except Exception as e:
+        log.debug(f"[escort_roster] _write_shift_log skipped: {e}")
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Core sync
+# ────────────────────────────────────────────────────────────────────────────
+
+async def sync_program_to_roster(program_id: int, actor: str = "system", conn=None) -> dict:
+    """
+    Upsert a wbom_escort_programs row into escort_roster_entries.
+    Computes pay fields from start_date/shift → end_date/end_shift.
+    Returns the upserted row dict.
+
+    Single atomic `INSERT ... ON CONFLICT (program_id) DO UPDATE` (Phase 1I,
+    2026-07-18) -- previously a SELECT-existing-row-then-branch (UPDATE vs
+    INSERT), a real check-then-act race under concurrent calls for the same
+    program_id (reproduced: concurrent calls raised
+    "duplicate key value violates unique constraint
+    escort_roster_entries_program_id_key"). Matches
+    modules.escort_lifecycle's own proven atomic upsert pattern.
+
+    Accepts an optional `conn` so a caller already holding a transaction
+    (e.g. escort_lifecycle) can compose this into it atomically instead of
+    this function acquiring its own connection from the shared pool --
+    reproduced and confirmed as a genuine deadlock otherwise: this function
+    never accepted/threaded a `conn` before, so calling it from inside an
+    already-open `pool.acquire()` block (holding 1 of N pool connections)
+    while it tried to acquire its own connection could exhaust a small pool
+    and hang all concurrent callers forever (see
+    knowledge_base/00_governance/escort_dualwrite_concurrency_debug_2026-07-17.md
+    and the Phase 1I reproduction in management_decisions.md for the exact
+    evidence -- this is the "second, un-root-caused issue" that made the
+    2026-07-13 refactor attempt hang even after its check-then-act race was
+    fixed).
+    """
+    prog = await fetch_one(
+        """
+        SELECT p.*, e.employee_name AS _escort_name
+        FROM wbom_escort_programs p
+        LEFT JOIN wbom_employees e ON e.employee_id = p.escort_employee_id
+        WHERE p.program_id = $1
+        """,
+        program_id,
+        conn=conn,
+    )
+    if not prog:
+        raise ValueError(f"Program {program_id} not found")
+
+    # Determine start date + shift
+    start_date: Optional[date] = prog.get("start_date") or prog.get("program_date")
+    start_shift: str = (prog.get("shift") or "D").upper()[:1] or "D"
+
+    # Determine end date + shift
+    end_date: Optional[date] = prog.get("end_date")
+    end_shift: str = (prog.get("end_shift") or "N").upper()[:1] or "N"
+
+    # Escort name: DB column preferred, fall back to employee record
+    escort_name = prog.get("escort_name") or prog.get("_escort_name")
+
+    # Build pay calculation if dates available
+    pay: dict = {}
+    if start_date and end_date:
+        conveyance = await _get_conveyance_for_destination(prog.get("destination"), conn=conn)
+        shift_rate = await _get_shift_rate(conn=conn)
+        pay = calculate_pay(start_date, start_shift, end_date, end_shift, conveyance, shift_rate)
+    elif prog.get("total_payment"):
+        # Legacy: use existing total_payment
+        pay = {
+            "total_shifts": None,
+            "total_days": float(prog.get("total_days") or prog.get("day_count") or 0),
+            "salary": float(prog["total_payment"]) - float(prog.get("conveyance") or 0),
+            "conveyance": float(prog.get("conveyance") or 0),
+            "total": float(prog["total_payment"]),
+        }
+
+    # Keep roster_status aligned with the source program lifecycle.
+    # `confirmed` is a first-class roster state so confirmed programs are never
+    # shown as draft after bridge source-of-truth reconciliation.
+    prog_status = (prog.get("status") or "draft").strip()
+    status_map = {
+        "draft": "draft",
+        "confirmed": "confirmed",
+        "assigned": "active",
+        "running": "active",
+        "completed": "completed",
+        "cancelled": "cancelled",
+        "expired": "expired",
+        "escort_changed": "escort_changed",  # Phase 2A.3 (migration 049) -- historical, non-blocking
+    }
+    roster_status = status_map.get(prog_status.lower(), "draft")
+
+    # food_bill + net_payable from source program (migration 018 columns)
+    food_bill_val = float(prog.get("food_bill") or 0)
+    roster_total = float(pay.get("total") or 0)
+    net_payable_val = max(roster_total - food_bill_val, 0.0)
+
+    # xmax = 0 is the standard Postgres idiom for "this row was just
+    # inserted, never updated" -- lets us know insert-vs-update from the
+    # single atomic statement without a separate existence check.
+    upserted = await fetch_one(
+        """
+        INSERT INTO escort_roster_entries (
+            program_id, mother_vessel, lighter_vessel, master_mobile,
+            escort_name, escort_mobile, destination,
+            start_date, start_shift, end_date, end_shift,
+            total_shifts, total_days, salary, conveyance, total,
+            release_point, roster_status, escort_employee_id,
+            food_bill, net_payable, calc_version, last_synced_at
+        ) VALUES (
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,1,NOW()
+        )
+        ON CONFLICT (program_id) DO UPDATE SET
+            mother_vessel       = EXCLUDED.mother_vessel,
+            lighter_vessel      = EXCLUDED.lighter_vessel,
+            master_mobile       = EXCLUDED.master_mobile,
+            escort_name         = EXCLUDED.escort_name,
+            escort_mobile       = EXCLUDED.escort_mobile,
+            destination         = EXCLUDED.destination,
+            start_date          = EXCLUDED.start_date,
+            start_shift         = EXCLUDED.start_shift,
+            end_date            = EXCLUDED.end_date,
+            end_shift           = EXCLUDED.end_shift,
+            total_shifts        = EXCLUDED.total_shifts,
+            total_days          = EXCLUDED.total_days,
+            salary              = EXCLUDED.salary,
+            conveyance          = EXCLUDED.conveyance,
+            total               = EXCLUDED.total,
+            release_point       = EXCLUDED.release_point,
+            roster_status       = EXCLUDED.roster_status,
+            escort_employee_id  = EXCLUDED.escort_employee_id,
+            food_bill           = EXCLUDED.food_bill,
+            net_payable         = EXCLUDED.net_payable,
+            calc_version        = escort_roster_entries.calc_version + 1,
+            last_synced_at      = NOW(),
+            updated_at          = NOW()
+        RETURNING *, (xmax = 0) AS _inserted
+        """,
+        program_id,
+        prog["mother_vessel"],
+        prog["lighter_vessel"],
+        prog.get("master_mobile"),
+        escort_name,
+        prog.get("escort_mobile"),
+        prog.get("destination"),
+        start_date,
+        start_shift,
+        end_date,
+        end_shift,
+        pay.get("total_shifts"),
+        pay.get("total_days"),
+        pay.get("salary"),
+        pay.get("conveyance"),
+        pay.get("total"),
+        prog.get("release_point") or prog.get("release_location"),
+        roster_status,
+        prog.get("escort_employee_id"),
+        food_bill_val,
+        net_payable_val,
+        conn=conn,
+    )
+    action = "sync_insert" if upserted.get("_inserted") else "sync_update"
+
+    # Write shift log entries so the detail timeline has real data
+    if roster_status == "active" and start_date:
+        await _write_shift_log(program_id, start_date, start_shift, "start",
+                               f"Duty started on {prog.get('mother_vessel','')}", actor, conn=conn)
+    elif roster_status == "completed" and end_date:
+        await _write_shift_log(program_id, end_date, end_shift, "release",
+                               f"Released at {prog.get('release_point','')}", actor, conn=conn)
+
+    await log_audit(
+        program_id=program_id,
+        action=action,
+        new_data={**dict(prog), **pay, "roster_status": roster_status},
+        performed_by=actor,
+        source="sync",
+        conn=conn,
+    )
+
+    upserted.pop("_inserted", None)
+    return dict(upserted)
+
+
+async def sync_all_programs(actor: str = "system") -> dict:
+    """
+    Bulk sync ALL wbom_escort_programs rows into escort_roster_entries.
+    Idempotent — safe to re-run.
+    Returns {"synced": N, "errors": [...]}.
+    """
+    rows = await fetch_all("SELECT program_id FROM wbom_escort_programs ORDER BY program_id")
+    synced = 0
+    errors = []
+    for row in rows:
+        pid = row["program_id"]
+        try:
+            await sync_program_to_roster(pid, actor=actor)
+            synced += 1
+        except Exception as e:
+            log.warning(f"[sync_all] program_id={pid} error: {e}")
+            errors.append({"program_id": pid, "error": str(e)})
+    return {"synced": synced, "errors": errors}
+
+
+async def recalculate_entry(program_id: int, actor: str = "system") -> dict:
+    """
+    Recompute pay fields for an existing roster entry.
+    Source-backed rows resync from wbom_escort_programs; manual roster-only rows
+    fall back to their own stored dates so the UI recalculate action never 404s.
+    """
+    try:
+        return await sync_program_to_roster(program_id, actor=actor)
+    except ValueError:
+        row = await fetch_one(
+            "SELECT * FROM escort_roster_entries WHERE program_id = $1", program_id
+        )
+        if not row:
+            raise ValueError(f"Program {program_id} not found")
+
+        old_row = dict(row)
+        start_date = row.get("start_date")
+        start_shift = (row.get("start_shift") or "D").upper()[:1] or "D"
+        end_date = row.get("end_date")
+        end_shift = (row.get("end_shift") or "N").upper()[:1] or "N"
+
+        updates: dict[str, Any] = {}
+        if start_date and end_date:
+            conveyance = (
+                Decimal(str(row["conveyance"]))
+                if row.get("conveyance") is not None
+                else await _get_conveyance_for_destination(row.get("destination"))
+            )
+            shift_rate = await _get_shift_rate()
+            updates = calculate_pay(
+                start_date,
+                start_shift,
+                end_date,
+                end_shift,
+                conveyance,
+                shift_rate,
+            )
+
+        if updates:
+            await execute(
+                """
+                UPDATE escort_roster_entries SET
+                    total_shifts = $2,
+                    total_days = $3,
+                    salary = $4,
+                    conveyance = $5,
+                    total = $6,
+                    updated_at = NOW()
+                WHERE program_id = $1
+                """,
+                program_id,
+                updates["total_shifts"],
+                updates["total_days"],
+                updates["salary"],
+                updates["conveyance"],
+                updates["total"],
+            )
+        else:
+            await execute(
+                "UPDATE escort_roster_entries SET updated_at = NOW() WHERE program_id = $1",
+                program_id,
+            )
+
+        fresh = await fetch_one(
+            "SELECT * FROM escort_roster_entries WHERE program_id = $1", program_id
+        )
+        await log_audit(
+            program_id=program_id,
+            action="recalculate",
+            old_data=old_row,
+            new_data=updates or {"note": "manual_roster_noop"},
+            performed_by=actor,
+            source="manual_recalculate",
+        )
+        return dict(fresh) if fresh else {}
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Queries
+# ────────────────────────────────────────────────────────────────────────────
+
+def _parse_date_filter(raw: str) -> Optional[date]:
+    """Parse a start_from/start_to query filter into a real date object.
+
+    asyncpg requires an actual datetime.date for a date-typed column bind
+    parameter — passing the raw query string directly raises
+    AttributeError: 'str' object has no attribute 'toordinal'. Returns None
+    on anything unparsable so callers can skip the filter instead of 500ing.
+    """
+    try:
+        return date.fromisoformat(raw.strip())
+    except (ValueError, AttributeError):
+        return None
+
+
+async def get_roster_list(
+    page: int = 1,
+    page_size: int = 50,
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+    start_from: Optional[str] = None,
+    start_to: Optional[str] = None,
+    sort_by: str = "start_date",
+    sort_dir: str = "desc",
+) -> dict:
+    """
+    Paginated roster list with search/filter.
+    Returns {"items": [...], "total": N, "page": N, "page_size": N, "pages": N}.
+    """
+    allowed_sort = {
+        "start_date", "end_date", "total", "total_shifts", "total_days",
+        "mother_vessel", "lighter_vessel", "escort_name", "program_id", "created_at"
+    }
+    if sort_by not in allowed_sort:
+        sort_by = "start_date"
+    sort_dir = "DESC" if sort_dir.lower() == "desc" else "ASC"
+
+    ttl_hours = int(get_settings().draft_ttl_hours)
+
+    conditions = []
+    params: list[Any] = []
+    idx = 1
+
+    # Never show stale, unconfirmed draft rows in roster list after TTL.
+    conditions.append(
+        f"NOT (LOWER(COALESCE(e.roster_status, 'draft')) = 'draft' "
+        f"AND e.created_at < NOW() - (${idx} || ' hours')::INTERVAL)"
+    )
+    params.append(str(ttl_hours))
+    idx += 1
+
+    if search:
+        conditions.append(
+            f"(e.mother_vessel ILIKE ${idx} OR e.lighter_vessel ILIKE ${idx} "
+            f"OR e.escort_name ILIKE ${idx} OR e.master_mobile ILIKE ${idx} "
+            f"OR e.escort_mobile ILIKE ${idx} OR e.destination ILIKE ${idx})"
+        )
+        params.append(f"%{search}%")
+        idx += 1
+
+    if status:
+        # Case-insensitive match using source program status when present,
+        # otherwise fall back to roster_status for roster-only/manual entries.
+        conditions.append(
+            f"LOWER(COALESCE(NULLIF(TRIM(p.status), ''), NULLIF(TRIM(e.roster_status), ''), 'draft')) = LOWER(${idx})"
+        )
+        params.append(status)
+        idx += 1
+
+    if start_from:
+        parsed_start_from = _parse_date_filter(start_from)
+        if parsed_start_from is not None:
+            conditions.append(f"COALESCE(e.start_date, p.program_date) >= ${idx}")
+            params.append(parsed_start_from)
+            idx += 1
+        else:
+            log.warning(f"[escort_roster] ignoring unparsable start_from filter: {start_from!r}")
+
+    if start_to:
+        parsed_start_to = _parse_date_filter(start_to)
+        if parsed_start_to is not None:
+            conditions.append(f"COALESCE(e.start_date, p.program_date) <= ${idx}")
+            params.append(parsed_start_to)
+            idx += 1
+        else:
+            log.warning(f"[escort_roster] ignoring unparsable start_to filter: {start_to!r}")
+
+    # Always JOIN wbom_escort_programs so p.status filter works
+    join_clause = "LEFT JOIN wbom_escort_programs p ON p.program_id = e.program_id"
+    where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+
+    total = await fetch_val(
+        f"SELECT COUNT(*) FROM escort_roster_entries e {join_clause} {where_clause}",
+        *params,
+    ) or 0
+
+    offset = (page - 1) * page_size
+    params_paged = params + [page_size, offset]
+    rows = await fetch_all(
+        f"""
+        SELECT e.*,
+               p.status AS program_status,
+               p.is_historical,
+               p.remarks,
+               p.capacity,
+             p.whatsapp_message_id,
+             COALESCE(e.start_date, p.program_date) AS display_date
+        FROM escort_roster_entries e
+        {join_clause}
+        {where_clause}
+        ORDER BY {('COALESCE(e.start_date, p.program_date)' if sort_by == 'start_date' else 'e.' + sort_by)} {sort_dir} NULLS LAST
+        LIMIT ${idx} OFFSET ${idx+1}
+        """,
+        *params_paged,
+    )
+
+    items = [dict(r) for r in rows]
+    # Convert date/Decimal to serialisable types
+    for item in items:
+        for k, v in item.items():
+            if isinstance(v, date):
+                item[k] = v.isoformat()
+            elif isinstance(v, Decimal):
+                item[k] = float(v)
+
+    pages = max(1, -(-int(total) // page_size))  # ceiling division
+    return {
+        "items": items,
+        "total": int(total),
+        "page": page,
+        "page_size": page_size,
+        "pages": pages,
+    }
+
+
+async def get_roster_detail(program_id: int) -> Optional[dict]:
+    """
+    Full detail for a single program: roster entry + slip matches + audit log.
+    """
+    entry = await fetch_one(
+        """
+        SELECT e.*,
+               p.status AS program_status, p.remarks, p.capacity,
+               p.whatsapp_message_id, p.assignment_time, p.completion_time
+        FROM escort_roster_entries e
+        LEFT JOIN wbom_escort_programs p ON p.program_id = e.program_id
+        WHERE e.program_id = $1
+        """,
+        program_id,
+    )
+    if not entry:
+        return None
+
+    result = dict(entry)
+    # Serialise dates/Decimals
+    for k, v in result.items():
+        if hasattr(v, "isoformat"):
+            result[k] = v.isoformat()
+        elif isinstance(v, Decimal):
+            result[k] = float(v)
+
+    # Parse remarks safely
+    result["remarks_parsed"] = _safe_json(result.get("remarks"))
+
+    # Slip matches
+    matches = await fetch_all(
+        """
+        SELECT rm.*, se.source_file AS image_path, se.escort_name AS extracted_escort_name,
+               se.escort_mobile AS extracted_escort_mobile, se.confidence,
+               se.raw_text, se.created_at AS extraction_date
+        FROM escort_release_matches rm
+        LEFT JOIN escort_slip_extractions se ON se.id = rm.extraction_id
+        WHERE rm.program_id = $1
+        ORDER BY rm.match_confidence DESC, rm.created_at DESC
+        LIMIT 20
+        """,
+        program_id,
+    )
+    result["slip_matches"] = [dict(m) for m in matches]
+
+    # Audit log (last 20)
+    audits = await fetch_all(
+        """
+        SELECT id, action, performed_by, source, created_at
+        FROM escort_roster_audit_logs
+        WHERE program_id = $1
+        ORDER BY created_at DESC
+        LIMIT 20
+        """,
+        program_id,
+    )
+    result["audit_log"] = [
+        {**dict(a), "created_at": a["created_at"].isoformat() if a.get("created_at") else None}
+        for a in audits
+    ]
+
+    # Shift logs
+    shift_logs = await fetch_all(
+        """
+        SELECT * FROM escort_shift_logs
+        WHERE program_id = $1
+        ORDER BY shift_date, shift
+        """,
+        program_id,
+    )
+    result["shift_logs"] = [
+        {**dict(s), "shift_date": s["shift_date"].isoformat() if s.get("shift_date") else None}
+        for s in shift_logs
+    ]
+
+    return result
+
+
+async def update_roster_entry(
+    program_id: int,
+    updates: dict,
+    actor: str = "system",
+) -> Optional[dict]:
+    """
+    Partial update of escort_roster_entries.
+    Allowed fields: notes, release_point, roster_status, conveyance, end_date, end_shift.
+    """
+    allowed = {
+        "notes", "release_point", "roster_status", "conveyance",
+        "end_date", "end_shift", "start_date", "start_shift",
+        "mother_vessel", "lighter_vessel", "master_mobile",
+        "escort_name", "escort_mobile",
+    }
+    clean = {k: v for k, v in updates.items() if k in allowed and v is not None}
+    if not clean:
+        raise ValueError("No valid update fields provided")
+
+    old = await fetch_one(
+        "SELECT * FROM escort_roster_entries WHERE program_id = $1", program_id
+    )
+    if not old:
+        raise ValueError(f"Roster entry for program {program_id} not found")
+
+    # Duplicate guard on the final, prospective row values.
+    prospective = dict(old)
+    prospective.update(clean)
+    dup = await _find_duplicate_roster_entry(
+        prospective.get("mother_vessel"),
+        prospective.get("lighter_vessel"),
+        prospective.get("start_date"),
+        prospective.get("escort_name"),
+        exclude_program_id=program_id,
+    )
+    if dup:
+        if dup.get("type") == "vessel_date":
+            raise ValueError(
+                "Duplicate roster blocked: same mother vessel + lighter vessel already exists on this date "
+                f"(program_id={dup.get('program_id')})."
+            )
+        raise ValueError(
+            "Duplicate roster blocked: same mother vessel + lighter vessel + escort already exists on this date "
+            f"(program_id={dup.get('program_id')})."
+        )
+
+    set_clauses = []
+    params: list[Any] = [program_id]
+    idx = 2
+    for k, v in clean.items():
+        set_clauses.append(f"{k} = ${idx}")
+        params.append(v)
+        idx += 1
+    set_clauses.append(f"updated_at = NOW()")
+
+    await execute(
+        f"UPDATE escort_roster_entries SET {', '.join(set_clauses)} WHERE program_id = $1",
+        *params,
+    )
+
+    # If dates changed, recalculate pay
+    if any(k in clean for k in ("start_date", "start_shift", "end_date", "end_shift")):
+        row = await fetch_one(
+            "SELECT * FROM escort_roster_entries WHERE program_id = $1", program_id
+        )
+        if row and row.get("start_date") and row.get("end_date"):
+            conveyance = await _get_conveyance_for_destination(row.get("destination"))
+            if clean.get("conveyance") is not None:
+                conveyance = Decimal(str(clean["conveyance"]))
+            shift_rate = await _get_shift_rate()
+            pay = calculate_pay(
+                row["start_date"], row["start_shift"] or "D",
+                row["end_date"], row["end_shift"] or "N",
+                conveyance, shift_rate,
+            )
+            await execute(
+                """
+                UPDATE escort_roster_entries SET
+                    total_shifts = $2, total_days = $3,
+                    salary = $4, conveyance = $5, total = $6,
+                    net_payable = GREATEST($6 - food_bill, 0),
+                    updated_at = NOW()
+                WHERE program_id = $1
+                """,
+                program_id,
+                pay["total_shifts"], pay["total_days"],
+                pay["salary"], pay["conveyance"], pay["total"],
+            )
+
+    await log_audit(
+        program_id=program_id,
+        action="edit",
+        old_data=dict(old),
+        new_data=clean,
+        performed_by=actor,
+        source="api",
+    )
+    return await fetch_one(
+        "SELECT * FROM escort_roster_entries WHERE program_id = $1", program_id
+    )
+
+
+# Constant key for the transaction-scoped advisory lock serializing
+# create_roster_entry() (Phase 2B, 2026-07-18). Any fixed 64-bit int works;
+# derived from hashtext() of a unique label so it can't collide with any
+# other advisory lock key used elsewhere in this codebase by accident.
+_CREATE_ROSTER_ENTRY_LOCK_KEY = "escort_roster.create_roster_entry"
+
+
+async def create_roster_entry(data: dict, actor: str = "system") -> dict:
+    """
+    Manually create a new escort_roster_entries row.
+    Generates a safe program_id using the DB sequence gap above any existing value.
+
+    Phase 2B (2026-07-18): the whole check-then-act sequence (max_pid
+    generation, duplicate-vessel check, insert) is wrapped in one
+    transaction serialized by a transaction-scoped advisory lock
+    (pg_advisory_xact_lock) -- reproduced two real, independent races here
+    before this fix: (1) max_pid computed via SELECT MAX+1 then used in a
+    separate INSERT -- concurrent calls could compute the identical
+    "next" id (reproduced: 9/10 concurrent calls hit a live
+    UniqueViolationError on the same program_id); (2) _find_duplicate_
+    roster_entry()'s check-then-act had no DB-level constraint backing it,
+    so two concurrent calls for the same vessel/lighter/date/escort could
+    both pass the check before either commits. The advisory lock
+    serializes all concurrent callers of this one function (a low-
+    frequency, admin-only manual-entry tool -- no legitimate need for
+    concurrent throughput here), eliminating both TOCTOU windows without
+    any schema change or new unique constraint.
+    """
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtext($1))",
+                _CREATE_ROSTER_ENTRY_LOCK_KEY,
+            )
+
+            max_pid = await fetch_val(
+                """
+                SELECT GREATEST(
+                    COALESCE((SELECT MAX(program_id) FROM escort_roster_entries), 900000),
+                    COALESCE((SELECT MAX(program_id) FROM wbom_escort_programs), 900000)
+                ) + 1
+                """,
+                conn=conn,
+            )
+            program_id = int(max_pid)
+
+            dup = await _find_duplicate_roster_entry(
+                data.get("mother_vessel"),
+                data.get("lighter_vessel"),
+                data.get("start_date"),
+                data.get("escort_name"),
+                conn=conn,
+            )
+            if dup:
+                if dup.get("type") == "vessel_date":
+                    raise ValueError(
+                        "Duplicate roster blocked: same mother vessel + lighter vessel already exists on this date "
+                        f"(program_id={dup.get('program_id')})."
+                    )
+                raise ValueError(
+                    "Duplicate roster blocked: same mother vessel + lighter vessel + escort already exists on this date "
+                    f"(program_id={dup.get('program_id')})."
+                )
+
+            # Calculate pay if dates are provided
+            salary = None
+            total_shifts = None
+            total_days = None
+            total = None
+            conveyance_val = data.get("conveyance")
+            if data.get("start_date") and data.get("end_date"):
+                destination = data.get("destination")
+                conveyance = (
+                    Decimal(str(conveyance_val))
+                    if conveyance_val is not None
+                    else await _get_conveyance_for_destination(destination, conn=conn)
+                )
+                shift_rate = await _get_shift_rate(conn=conn)
+                pay = calculate_pay(
+                    data["start_date"], data.get("start_shift") or "D",
+                    data["end_date"], data.get("end_shift") or "N",
+                    conveyance, shift_rate,
+                )
+                total_shifts = pay["total_shifts"]
+                total_days = pay["total_days"]
+                salary = pay["salary"]
+                conveyance_val = pay["conveyance"]
+                total = pay["total"]
+
+            await execute(
+                """
+                INSERT INTO escort_roster_entries (
+                    program_id, mother_vessel, lighter_vessel, master_mobile,
+                    escort_name, escort_mobile, destination,
+                    start_date, start_shift, end_date, end_shift,
+                    total_shifts, total_days, salary, conveyance, total,
+                    release_point, roster_status, notes, created_at, updated_at
+                ) VALUES (
+                    $1, $2, $3, $4,
+                    $5, $6, $7,
+                    $8, $9, $10, $11,
+                    $12, $13, $14, $15, $16,
+                    $17, $18, $19, NOW(), NOW()
+                )
+                """,
+                program_id,
+                data.get("mother_vessel"),
+                data.get("lighter_vessel"),
+                data.get("master_mobile"),
+                data.get("escort_name"),
+                data.get("escort_mobile"),
+                data.get("destination"),
+                data.get("start_date"),
+                data.get("start_shift") or "D",
+                data.get("end_date"),
+                data.get("end_shift") or "N",
+                total_shifts,
+                total_days,
+                salary,
+                conveyance_val,
+                total,
+                data.get("release_point"),
+                data.get("roster_status") or "draft",
+                data.get("notes"),
+                conn=conn,
+            )
+
+            await log_audit(
+                program_id=program_id,
+                action="create",
+                old_data={},
+                new_data=data,
+                performed_by=actor,
+                source="api",
+                conn=conn,
+            )
+            row = await fetch_one(
+                "SELECT * FROM escort_roster_entries WHERE program_id = $1", program_id,
+                conn=conn,
+            )
+            return dict(row)
+
+
+async def get_roster_summary() -> dict:
+    """Aggregate stats for dashboard widget."""
+    ttl_hours = int(get_settings().draft_ttl_hours)
+    rows = await fetch_all(
+        """
+        SELECT roster_status, COUNT(*) AS cnt,
+               COALESCE(SUM(total), 0) AS total_amount,
+               COALESCE(SUM(net_payable), 0) AS net_payable_amount
+        FROM escort_roster_entries
+        WHERE NOT (
+            LOWER(COALESCE(roster_status, 'draft')) = 'draft'
+            AND created_at < NOW() - ($1 || ' hours')::INTERVAL
+        )
+        GROUP BY roster_status
+        """,
+        str(ttl_hours),
+    )
+    by_status: dict = {}
+    grand_total = 0.0
+    grand_count = 0
+    net_payable_total = 0.0
+    for r in rows:
+        by_status[r["roster_status"]] = {
+            "count": int(r["cnt"]),
+            "total_amount": float(r["total_amount"] or 0),
+            "net_payable_amount": float(r["net_payable_amount"] or 0),
+        }
+        grand_count += int(r["cnt"])
+        grand_total += float(r["total_amount"] or 0)
+        net_payable_total += float(r["net_payable_amount"] or 0)
+
+    active_programs = await fetch_val(
+        "SELECT COUNT(*) FROM wbom_escort_programs WHERE LOWER(status) IN ('assigned','running')"
+    )
+    # Pending slip reviews: extractions with no confirmed match
+    pending_slips = await fetch_val(
+        """SELECT COUNT(DISTINCT se.id) FROM escort_slip_extractions se
+           LEFT JOIN escort_release_matches rm ON rm.extraction_id = se.id
+               AND rm.admin_action IN ('keep', 'reject')
+           WHERE rm.id IS NULL"""
+    )
+    true_draft_count = await fetch_val(
+                """
+                SELECT COUNT(*)
+                FROM escort_roster_entries e
+                LEFT JOIN wbom_escort_programs p ON p.program_id = e.program_id
+                WHERE LOWER(COALESCE(p.status, e.roster_status, 'draft')) = 'draft'
+                    AND e.created_at >= NOW() - ($1 || ' hours')::INTERVAL
+                """,
+                str(ttl_hours),
+    )
+
+    return {
+        "by_status": by_status,
+        "grand_total": grand_count,
+        "grand_total_amount": round(grand_total, 2),
+        "net_payable_total": round(net_payable_total, 2),
+        "active_programs": int(active_programs or 0),
+        "pending_slip_reviews": int(pending_slips or 0),
+        "true_draft_count": int(true_draft_count or 0),
+    }
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Slip Queue (Task 5)
+# ────────────────────────────────────────────────────────────────────────────
+
+async def get_slip_queue(page: int = 1, page_size: int = 50) -> dict:
+    """Return pending OCR extractions with their best program match candidate."""
+    offset = (page - 1) * page_size
+    rows = await fetch_all(
+        """
+        SELECT
+            se.id          AS extraction_id,
+            se.source_file,
+            se.created_at,
+            se.document_type,
+            se.mother_vessel,
+            se.lighter_vessel,
+            se.master_mobile,
+            se.escort_name,
+            se.escort_mobile,
+            se.start_date,
+            se.completion_date,
+            se.release_place,
+            se.confidence,
+            se.raw_text,
+            rm.id          AS match_id,
+            rm.program_id,
+            rm.match_confidence,
+            rm.match_reason,
+            rm.admin_action,
+            ep.mother_vessel  AS prog_mv,
+            ep.lighter_vessel AS prog_lv,
+            ep.escort_name    AS prog_escort_name,
+            ep.status         AS prog_status
+        FROM escort_slip_extractions se
+        LEFT JOIN LATERAL (
+            SELECT * FROM escort_release_matches
+            WHERE extraction_id = se.id
+            ORDER BY match_confidence DESC NULLS LAST
+            LIMIT 1
+        ) rm ON TRUE
+        LEFT JOIN wbom_escort_programs ep ON ep.program_id = rm.program_id
+        WHERE (rm.admin_action IS NULL OR rm.admin_action = 'pending')
+        ORDER BY se.created_at DESC
+        LIMIT $1 OFFSET $2
+        """,
+        page_size,
+        offset,
+    )
+    total = await fetch_val(
+        """
+        SELECT COUNT(DISTINCT se.id) FROM escort_slip_extractions se
+        LEFT JOIN escort_release_matches rm ON rm.extraction_id = se.id
+            AND rm.admin_action IN ('keep','reject')
+        WHERE rm.id IS NULL
+        """
+    ) or 0
+    items = []
+    for r in rows:
+        item = dict(r)
+        for k, v in item.items():
+            if hasattr(v, "isoformat"):
+                item[k] = v.isoformat()
+        items.append(item)
+    return {
+        "items": items,
+        "total": int(total),
+        "page": page,
+        "page_size": page_size,
+        "pages": max(1, -(-int(total) // page_size)),
+    }
+
+
+async def confirm_slip_match(match_id: int, admin_phone: str = "system") -> bool:
+    """Set admin_action='keep' on an escort_release_matches row."""
+    result = await execute(
+        """
+        UPDATE escort_release_matches
+        SET admin_action = 'keep', admin_phone = $2, acted_at = NOW()
+        WHERE id = $1 AND (admin_action IS NULL OR admin_action = 'pending')
+        """,
+        match_id,
+        admin_phone,
+    )
+    return "UPDATE 1" in (result or "")
+
+
+async def reject_slip_match(match_id: int, admin_phone: str = "system") -> bool:
+    """Set admin_action='reject' on an escort_release_matches row."""
+    result = await execute(
+        """
+        UPDATE escort_release_matches
+        SET admin_action = 'reject', admin_phone = $2, acted_at = NOW()
+        WHERE id = $1 AND (admin_action IS NULL OR admin_action = 'pending')
+        """,
+        match_id,
+        admin_phone,
+    )
+    return "UPDATE 1" in (result or "")
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Audit logging
+# ────────────────────────────────────────────────────────────────────────────
+
+async def log_audit(
+    program_id: int,
+    action: str,
+    old_data: Optional[dict] = None,
+    new_data: Optional[dict] = None,
+    performed_by: str = "system",
+    source: str = "system",
+    conn=None,
+) -> None:
+    """Append a row to escort_roster_audit_logs."""
+    def _safe(d: Optional[dict]) -> Optional[str]:
+        if d is None:
+            return None
+        try:
+            return json.dumps({
+                k: v.isoformat() if hasattr(v, "isoformat") else
+                   float(v) if isinstance(v, Decimal) else v
+                for k, v in d.items()
+            })
+        except Exception:
+            return None
+
+    try:
+        await execute(
+            """
+            INSERT INTO escort_roster_audit_logs
+                (program_id, action, old_data, new_data, performed_by, source)
+            VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6)
+            """,
+            program_id,
+            action,
+            _safe(old_data),
+            _safe(new_data),
+            performed_by,
+            source,
+            conn=conn,
+        )
+    except Exception as e:
+        log.warning(f"[audit] log_audit failed: {e}")
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Config
+# ────────────────────────────────────────────────────────────────────────────
+
+async def get_conveyance_config() -> list[dict]:
+    rows = await fetch_all(
+        "SELECT * FROM escort_calculation_config ORDER BY destination"
+    )
+    return [dict(r) for r in rows]
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Draft management
+# ────────────────────────────────────────────────────────────────────────────
+
+async def get_draft_entries(page: int = 1, page_size: int = 50) -> dict:
+    """Return paginated draft entries from escort_roster_entries."""
+    offset = (page - 1) * page_size
+    total = await fetch_val(
+        "SELECT COUNT(*) FROM escort_roster_entries WHERE roster_status = 'draft'"
+    )
+    rows = await fetch_all(
+        """
+        SELECT *
+        FROM escort_roster_entries
+        WHERE roster_status = 'draft'
+        ORDER BY id DESC
+        LIMIT $1 OFFSET $2
+        """,
+        page_size,
+        offset,
+    )
+    return {
+        "total": total or 0,
+        "page": page,
+        "page_size": page_size,
+        "items": [dict(r) for r in rows],
+    }
+
+
+async def cleanup_draft_entries(actor: str = "system") -> dict:
+    """
+    Delete ALL draft entries from escort_roster_entries.
+    Logs each deletion to escort_roster_audit_logs.
+    Returns summary of deleted entries.
+    """
+    drafts = await fetch_all(
+        "SELECT * FROM escort_roster_entries WHERE roster_status = 'draft'"
+    )
+    if not drafts:
+        return {"deleted": 0, "message": "No draft entries found"}
+
+    deleted = 0
+    for draft in drafts:
+        d = dict(draft)
+        await log_audit(
+            program_id=d.get("program_id"),
+            action="draft_cleanup",
+            old_data=d,
+            new_data=None,
+            performed_by=actor,
+            source="api",
+        )
+
+    result = await execute(
+        "DELETE FROM escort_roster_entries WHERE roster_status = 'draft'"
+    )
+    deleted = len(drafts)
+    log.info(f"[cleanup_drafts] Deleted {deleted} draft entries (actor={actor})")
+    return {"deleted": deleted, "message": f"Deleted {deleted} draft entries"}
+
+
+async def expire_stale_drafts(hours: int = 24, actor: str = "scheduler") -> dict:
+    """
+    Permanently delete stale, INCOMPLETE draft entries and their source
+    draft programs.
+
+    Requirement: unconfirmed escort drafts must not remain visible in the
+    frontend after TTL. We keep audit trail via escort_roster_audit_logs.
+
+    Phase 2A.3 Stage 4 (sec.17): narrowed from "any draft-status row past
+    TTL" to the Owner's exact predicate -- a draft that already has a
+    usable escort_name AND escort_mobile is not "incomplete" even though
+    it hasn't been formally ESCORTCONFIRMed yet, and must be preserved.
+    "No confirmed program"/"no attendance"/"no payment/release side
+    effect" are already structurally guaranteed by roster_status='draft'
+    itself (a program can only reach running/attendance/payment/release
+    after ESCORTCONFIRM moves it out of 'draft' -- confirmed via the full
+    escort_lifecycle trace done for this phase's Decision Report), so no
+    separate join against wbom_attendance/fazle_payment_drafts is needed
+    here to enforce that part of the predicate.
+    """
+    stale = await fetch_all(
+        """
+        SELECT * FROM escort_roster_entries
+        WHERE roster_status = 'draft'
+          AND created_at < NOW() - ($1 || ' hours')::INTERVAL
+          AND (escort_name IS NULL OR TRIM(escort_name) = '')
+          AND (escort_mobile IS NULL OR TRIM(escort_mobile) = '')
+          AND NOT EXISTS (
+              -- 2026-07-22, Owner Decision B: Trusted-Group-sourced drafts
+              -- (tagged in wbom_escort_programs.remarks by
+              -- modules.escort.save_escort_programs(group_sourced=True))
+              -- are exempt from TTL deletion -- they survive until
+              -- explicitly confirmed or manually cancelled. Regex match on
+              -- the raw text column, not a jsonb cast, so a malformed
+              -- legacy remarks value can never turn this into a hard error
+              -- that blocks expiry for every other draft in the same run.
+              SELECT 1 FROM wbom_escort_programs p
+              WHERE p.program_id = escort_roster_entries.program_id
+                AND p.remarks ~ '"group_sourced"\s*:\s*true'
+          )
+        """,
+        str(hours),
+    )
+    if not stale:
+        return {"expired": 0, "message": "No stale incomplete drafts found"}
+
+    for draft in stale:
+        d = dict(draft)
+        await log_audit(
+            program_id=d.get("program_id"),
+            action="draft_ttl_deleted",
+            old_data=d,
+            new_data={"roster_status": "deleted", "program_status": "deleted"},
+            performed_by=actor,
+            source="scheduler",
+        )
+
+    program_ids = [r["program_id"] for r in stale]
+    await execute(
+        "DELETE FROM escort_roster_entries WHERE program_id = ANY($1::int[])",
+        program_ids,
+    )
+    if program_ids:
+        await execute(
+            """
+            DELETE FROM wbom_escort_programs
+             WHERE program_id = ANY($1::int[])
+               AND status = 'draft'
+            """,
+            program_ids,
+        )
+    count = len(stale)
+    log.info(f"[expire_drafts] Deleted {count} stale drafts (>{hours}h, actor={actor})")
+
+    # Defensive sweep (Session 16, S16-02): a pre-2026-07-05 bug path could
+    # leave a program sitting in status='expired' instead of being deleted
+    # (see knowledge_base/00_governance/escort_sender_validation_audit_2026-07-16.md,
+    # 18 such rows found and cleaned up one-time). Nothing has produced a new
+    # row via that path since the 2026-07-05 fix, but Rule 3 is "no draft
+    # exists beyond 24h under any circumstance" — so also catch any
+    # financially-inert legacy 'expired' row past TTL here, every run, as
+    # insurance against a future edge case reintroducing the same limbo.
+    legacy_expired = await fetch_all(
+        """
+        SELECT p.*, e.id AS roster_entry_id
+        FROM wbom_escort_programs p
+        LEFT JOIN escort_roster_entries e ON e.program_id = p.program_id
+        WHERE p.status = 'expired'
+          AND p.escort_employee_id IS NULL
+          AND p.assignment_time < NOW() - ($1 || ' hours')::INTERVAL
+        """,
+        str(hours),
+    )
+    legacy_count = 0
+    if legacy_expired:
+        legacy_ids = [r["program_id"] for r in legacy_expired]
+        for row in legacy_expired:
+            await log_audit(
+                program_id=row["program_id"],
+                action="legacy_expired_ttl_deleted",
+                old_data=dict(row),
+                new_data={"status": "deleted"},
+                performed_by=actor,
+                source="scheduler",
+            )
+        await execute("DELETE FROM escort_roster_entries WHERE program_id = ANY($1::int[])", legacy_ids)
+        await execute(
+            "DELETE FROM wbom_escort_programs WHERE program_id = ANY($1::int[]) AND status = 'expired'",
+            legacy_ids,
+        )
+        legacy_count = len(legacy_ids)
+        log.info(f"[expire_drafts] Deleted {legacy_count} legacy financially-inert 'expired' row(s) (>{hours}h, actor={actor})")
+
+    total = count + legacy_count
+    return {"expired": total, "message": f"Deleted {count} stale draft(s) + {legacy_count} legacy expired row(s) older than {hours}h"}
+
+
+async def reconcile_drafts_for_confirmation(
+    lighter_vessel: str,
+    mother_vessel: Optional[str] = None,
+    actor: str = "reconciler",
+) -> dict:
+    """
+    After a program is confirmed, delete any orphaned draft rows in
+    wbom_escort_programs whose lighter_vessel fuzzy-matches the confirmed one.
+
+    Only touches rows with status='draft'. Cleans escort_roster_entries first
+    to avoid FK violations, then hard-deletes from wbom_escort_programs.
+    """
+    if not lighter_vessel or not lighter_vessel.strip():
+        return {"reconciled": 0}
+
+    from difflib import SequenceMatcher
+
+    lv_key = lighter_vessel.strip().lower()
+    mv_key = re.sub(r"^mv\.?\s+", "", (mother_vessel or "").lower()).strip()
+
+    candidates = await fetch_all(
+        """
+        SELECT program_id, mother_vessel, lighter_vessel
+        FROM wbom_escort_programs
+        WHERE status = 'draft'
+          AND lighter_vessel IS NOT NULL AND lighter_vessel != ''
+        ORDER BY program_id DESC
+        LIMIT 300
+        """,
+    )
+
+    to_delete: list[int] = []
+    for row in candidates:
+        lv_sim = SequenceMatcher(
+            None, lv_key, (row["lighter_vessel"] or "").strip().lower()
+        ).ratio()
+        if lv_sim < 0.75:
+            continue
+        # Optional mother vessel filter — skip if both non-empty and too different
+        if mv_key:
+            mv_row = re.sub(r"^mv\.?\s+", "", (row["mother_vessel"] or "").lower()).strip()
+            if mv_row and SequenceMatcher(None, mv_key, mv_row).ratio() < 0.60:
+                continue
+        to_delete.append(row["program_id"])
+
+    if not to_delete:
+        return {"reconciled": 0}
+
+    # Remove from roster mirror first (FK dependency)
+    await execute(
+        "DELETE FROM escort_roster_entries WHERE program_id = ANY($1::int[])",
+        to_delete,
+    )
+
+    for pid in to_delete:
+        await log_audit(
+            program_id=pid,
+            action="draft_reconciled",
+            old_data={"lighter_vessel": lighter_vessel, "reason": "superseded_by_confirmation"},
+            new_data=None,
+            performed_by=actor,
+            source="reconciler",
+        )
+
+    await execute(
+        "DELETE FROM wbom_escort_programs WHERE program_id = ANY($1::int[]) AND status = 'draft'",
+        to_delete,
+    )
+
+    log.info(
+        f"[reconcile_drafts] Reconciled {len(to_delete)} drafts "
+        f"for lighter={lighter_vessel!r} (actor={actor})"
+    )
+    return {"reconciled": len(to_delete), "program_ids": to_delete}
+
+
+async def cleanup_empty_drafts(min_age_hours: int = 1, actor: str = "scheduler") -> dict:
+    """
+    Delete draft rows in wbom_escort_programs that have NO meaningful data
+    (empty mother_vessel, lighter_vessel, and escort_name) and are at least
+    min_age_hours old. These are junk rows from failed OCR / partial extractions.
+    """
+    empty_rows = await fetch_all(
+        """
+        SELECT program_id FROM wbom_escort_programs
+        WHERE status = 'draft'
+          AND (mother_vessel  IS NULL OR TRIM(mother_vessel)  = '')
+          AND (lighter_vessel IS NULL OR TRIM(lighter_vessel) = '')
+          AND (escort_name    IS NULL OR TRIM(escort_name)    = '')
+          AND assignment_time < NOW() - ($1 || ' hours')::INTERVAL
+        ORDER BY program_id ASC
+        """,
+        str(min_age_hours),
+    )
+    if not empty_rows:
+        return {"deleted": 0, "message": "No empty draft programs found"}
+
+    ids = [r["program_id"] for r in empty_rows]
+
+    # Clean up roster mirror first (FK)
+    await execute(
+        "DELETE FROM escort_roster_entries WHERE program_id = ANY($1::int[])",
+        ids,
+    )
+    await execute(
+        "DELETE FROM wbom_escort_programs WHERE program_id = ANY($1::int[]) AND status = 'draft'",
+        ids,
+    )
+
+    log.info(f"[cleanup_empty_drafts] Deleted {len(ids)} empty draft programs (actor={actor})")
+    return {"deleted": len(ids), "message": f"Deleted {len(ids)} empty draft programs"}
+
+
+async def cleanup_junk_drafts(actor: str = "system") -> dict:
+    """
+    Delete draft programs where lighter_vessel looks like a junk partial extraction:
+    numbered list lines ("15. VESSEL, CAPACITY: ..., PHONE: ..."),
+    raw contact headers, or other clear non-vessel content.
+    FK-safe: deletes escort_roster_entries first.
+    """
+    junk_rows = await fetch_all(
+        """
+        SELECT program_id, mother_vessel, lighter_vessel
+        FROM wbom_escort_programs
+        WHERE status = 'draft'
+          AND lighter_vessel IS NOT NULL
+          AND TRIM(lighter_vessel) != ''
+          AND (
+              lighter_vessel ~ '^[0-9]+\.\s'
+              OR lighter_vessel ILIKE '%CAPACITY:%'
+              OR lighter_vessel ILIKE '%PHONE:%'
+              OR lighter_vessel ILIKE '%Contact number%'
+              OR lighter_vessel ILIKE '%S/N:%'
+              OR lighter_vessel ILIKE 'SI. No%'
+              OR lighter_vessel ILIKE '@BR-%'
+          )
+        ORDER BY program_id ASC
+        """
+    )
+    if not junk_rows:
+        return {"deleted": 0, "message": "No junk draft programs found"}
+
+    ids = [r["program_id"] for r in junk_rows]
+
+    await execute(
+        "DELETE FROM escort_roster_entries WHERE program_id = ANY($1::int[])",
+        ids,
+    )
+    await execute(
+        "DELETE FROM wbom_escort_programs WHERE program_id = ANY($1::int[]) AND status = 'draft'",
+        ids,
+    )
+
+    for row in junk_rows:
+        await log_audit(
+            program_id=row["program_id"],
+            action="junk_draft_cleanup",
+            old_data=dict(row),
+            new_data=None,
+            performed_by=actor,
+            source="cleanup",
+        )
+
+    log.info(f"[cleanup_junk_drafts] Deleted {len(ids)} junk draft programs (actor={actor})")
+    return {"deleted": len(ids), "program_ids": ids}
+
+
+async def delete_draft_program(program_id: int, actor: str = "api") -> dict:
+    """
+    Permanently delete a single draft program (both escort_roster_entries and
+    wbom_escort_programs rows).  Refuses if the program is not in draft status.
+    """
+    prog = await fetch_one(
+        "SELECT program_id, status, mother_vessel FROM wbom_escort_programs WHERE program_id = $1",
+        program_id,
+    )
+    if not prog:
+        return {"error": f"Program {program_id} not found"}
+    if prog["status"] != "draft":
+        return {"error": f"Program {program_id} is '{prog['status']}', only draft programs can be deleted"}
+
+    await execute(
+        "DELETE FROM escort_roster_entries WHERE program_id = $1",
+        program_id,
+    )
+    await execute(
+        "DELETE FROM wbom_escort_programs WHERE program_id = $1 AND status = 'draft'",
+        program_id,
+    )
+    log.info(f"[delete_draft] Deleted draft program_id={program_id} (actor={actor})")
+    return {"deleted": True, "program_id": program_id}
+
+
+async def create_roster_change_request(
+    program_id: int,
+    action: str,
+    payload: dict,
+    requested_by: str,
+    requested_by_phone: Optional[str] = None,
+) -> dict:
+    """Store operator roster mutation requests for admin approval."""
+    # Phase 2A.3 (Dispatch Stage 2+): extended to also carry read-only
+    # review items that don't map to a direct edit/delete action --
+    # decide_roster_change_request()'s approval dispatch only implements
+    # 'edit'/'delete' so far; new action types created here are held
+    # 'pending' until a later stage's review UI/handler processes them.
+    if action not in {"edit", "delete", "manual_review_same_date_escort_change"}:
+        raise ValueError("Unsupported change request action")
+
+    existing = await fetch_one(
+        """
+        SELECT id, status FROM escort_roster_change_requests
+        WHERE program_id = $1 AND action = $2 AND status = 'pending'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        program_id,
+        action,
+    )
+    if existing:
+        return dict(existing)
+
+    row = await fetch_one(
+        """
+        INSERT INTO escort_roster_change_requests (
+            program_id, action, payload, status,
+            requested_by, requested_by_phone, requested_at
+        ) VALUES ($1, $2, $3::jsonb, 'pending', $4, $5, NOW())
+        RETURNING *
+        """,
+        program_id,
+        action,
+        # 2026-08-05 (confirmed bug fix): payload can carry raw date/datetime
+        # values (e.g. action="edit"'s payload={"updates": {...}} from
+        # api_roster_patch() -- a PATCH body field like program_date deserializes
+        # to a real date object, nested inside "updates", not at the top level).
+        # json.dumps() has no default encoder for date/datetime, so this raised
+        # "TypeError: Object of type date is not JSON serializable" whenever such
+        # a field was present. default=str matches the existing repo-wide
+        # convention (shared/realtime.py's json.dumps(..., default=str)) and
+        # converts any such value at any nesting depth to its string form --
+        # str(date(...)) is already ISO-8601 (YYYY-MM-DD), matching this file's
+        # own .isoformat() convention used elsewhere for the date/datetime case
+        # specifically. Payload semantics unchanged -- only date/datetime values
+        # become strings, exactly as they would if the caller had already
+        # serialized them.
+        json.dumps(payload or {}, default=str),
+        requested_by,
+        requested_by_phone,
+    )
+    await log_audit(
+        program_id=program_id,
+        action=f"change_request_{action}",
+        old_data=None,
+        new_data={"request_payload": payload or {}, "requested_by": requested_by},
+        performed_by=requested_by,
+        source="approval_queue",
+    )
+    return dict(row) if row else {}
+
+
+async def get_roster_change_requests(
+    status: Optional[str] = "pending",
+    page: int = 1,
+    page_size: int = 50,
+) -> dict:
+    """List change requests for review UIs."""
+    offset = (page - 1) * page_size
+    params: list[Any] = []
+    where = ""
+    if status:
+        params.append(status)
+        where = f"WHERE status = ${len(params)}"
+
+    params_total = list(params)
+    total = await fetch_val(
+        f"SELECT COUNT(*) FROM escort_roster_change_requests {where}",
+        *params_total,
+    ) or 0
+
+    params.append(page_size)
+    params.append(offset)
+    rows = await fetch_all(
+        f"""
+        SELECT *
+        FROM escort_roster_change_requests
+        {where}
+        ORDER BY requested_at DESC
+        LIMIT ${len(params)-1} OFFSET ${len(params)}
+        """,
+        *params,
+    )
+    return {
+        "items": [dict(r) for r in rows],
+        "total": int(total),
+        "page": page,
+        "page_size": page_size,
+        "pages": max(1, -(-int(total) // page_size)),
+    }
+
+
+async def get_roster_change_request(request_id: int) -> Optional[dict]:
+    row = await fetch_one(
+        "SELECT * FROM escort_roster_change_requests WHERE id = $1",
+        request_id,
+    )
+    return dict(row) if row else None
+
+
+async def decide_roster_change_request(
+    request_id: int,
+    decision: str,
+    reviewed_by: str,
+    review_note: Optional[str] = None,
+) -> dict:
+    """Approve or reject pending roster change requests and apply on approval."""
+    if decision not in {"approved", "rejected"}:
+        raise ValueError("Invalid decision")
+
+    req = await get_roster_change_request(request_id)
+    if not req:
+        raise ValueError("Change request not found")
+    if req.get("status") != "pending":
+        return req
+
+    program_id = int(req["program_id"])
+    action = str(req.get("action") or "").strip().lower()
+    payload = req.get("payload") or {}
+
+    apply_result: dict[str, Any] = {}
+    if decision == "approved":
+        if action == "edit":
+            updates = (payload or {}).get("updates") or {}
+            row = await update_roster_entry(program_id, updates, actor=reviewed_by)
+            apply_result = {"updated": bool(row), "program_id": program_id}
+        elif action == "delete":
+            apply_result = await delete_program_any_status(program_id, actor=reviewed_by)
+        else:
+            raise ValueError("Unsupported request action")
+
+    await execute(
+        """
+        UPDATE escort_roster_change_requests
+        SET status = $2,
+            reviewed_by = $3,
+            review_note = $4,
+            reviewed_at = NOW(),
+            result_payload = $5::jsonb
+        WHERE id = $1
+        """,
+        request_id,
+        decision,
+        reviewed_by,
+        review_note,
+        json.dumps(apply_result or {}),
+    )
+
+    await log_audit(
+        program_id=program_id,
+        action=f"change_request_{decision}",
+        old_data={"request_id": request_id, "action": action},
+        new_data={"result": apply_result, "note": review_note},
+        performed_by=reviewed_by,
+        source="approval_queue",
+    )
+    out = await get_roster_change_request(request_id)
+    return out or {}
+
+
+async def delete_program_any_status(program_id: int, actor: str = "admin") -> dict:
+    """
+    Admin/Superadmin hard delete with dependency safety.
+    Blocks when dependent records exist.
+    """
+    prog = await fetch_one(
+        "SELECT program_id, status, mother_vessel FROM wbom_escort_programs WHERE program_id = $1",
+        program_id,
+    )
+    roster = await fetch_one(
+        "SELECT program_id FROM escort_roster_entries WHERE program_id = $1",
+        program_id,
+    )
+    if not prog and not roster:
+        return {"error": f"Program {program_id} not found"}
+
+    if await _duplicate_has_dependencies(program_id):
+        return {"error": "Cannot delete program with dependent records"}
+
+    await execute("DELETE FROM escort_roster_entries WHERE program_id = $1", program_id)
+    await execute("DELETE FROM wbom_escort_programs WHERE program_id = $1", program_id)
+
+    await log_audit(
+        program_id=program_id,
+        action="admin_hard_delete",
+        old_data={"status": (prog or {}).get("status") if prog else None},
+        new_data=None,
+        performed_by=actor,
+        source="api",
+    )
+    return {
+        "deleted": True,
+        "program_id": program_id,
+        "status": (prog or {}).get("status") if prog else None,
+    }
+
+
+async def upsert_conveyance_config(
+    destination: str,
+    conveyance_amount: float,
+    shift_rate: float = 200.0,
+    actor: str = "system",
+) -> dict:
+    key = destination.strip().lower()
+    await execute(
+        """
+        INSERT INTO escort_calculation_config
+            (destination, destination_key, conveyance_amount, shift_rate, updated_by, updated_at)
+        VALUES ($1, $2, $3, $4, $5, NOW())
+        ON CONFLICT (destination_key) DO UPDATE SET
+            conveyance_amount = EXCLUDED.conveyance_amount,
+            shift_rate        = EXCLUDED.shift_rate,
+            updated_by        = EXCLUDED.updated_by,
+            updated_at        = NOW()
+        """,
+        destination.strip(),
+        key,
+        conveyance_amount,
+        shift_rate,
+        actor,
+    )
+    row = await fetch_one(
+        "SELECT * FROM escort_calculation_config WHERE destination_key = $1", key
+    )
+    return dict(row) if row else {}
+
+
+async def audit_exact_confirmed_duplicates(days: int = 30) -> list[dict]:
+    """
+    Return exact duplicate groups for recent confirmed programs.
+
+    Exact key:
+      date + mother_vessel + lighter_vessel + escort_name
+    where date = COALESCE(start_date, program_date)
+    """
+    rows = await fetch_all(
+        """
+        WITH recent AS (
+            SELECT
+                program_id,
+                COALESCE(start_date, program_date) AS duty_date,
+                UPPER(TRIM(COALESCE(mother_vessel, ''))) AS mother_norm,
+                UPPER(TRIM(COALESCE(lighter_vessel, ''))) AS lighter_norm,
+                UPPER(TRIM(COALESCE(escort_name, ''))) AS escort_norm
+            FROM wbom_escort_programs
+            WHERE status = 'confirmed'
+              AND COALESCE(start_date, program_date) >= CURRENT_DATE - ($1::int || ' days')::interval
+        )
+        SELECT
+            duty_date,
+            mother_norm,
+            lighter_norm,
+            escort_norm,
+            COUNT(*) AS row_count,
+            ARRAY_AGG(program_id ORDER BY program_id) AS program_ids
+        FROM recent
+        WHERE duty_date IS NOT NULL
+          AND mother_norm <> ''
+          AND lighter_norm <> ''
+          AND escort_norm <> ''
+        GROUP BY duty_date, mother_norm, lighter_norm, escort_norm
+        HAVING COUNT(*) > 1
+        ORDER BY duty_date DESC, row_count DESC
+        """,
+        days,
+    )
+    return [dict(r) for r in rows]
+
+
+async def _duplicate_has_dependencies(program_id: int) -> bool:
+    """Return True if program row has dependent rows that block hard delete."""
+    dep = await fetch_val(
+        """
+        SELECT (
+            (SELECT COUNT(*) FROM escort_order_lighters WHERE program_id = $1)
+          + (SELECT COUNT(*) FROM fazle_payment_drafts WHERE escort_program_id = $1)
+          + (SELECT COUNT(*) FROM wbom_billing_records WHERE program_id = $1)
+          + (SELECT COUNT(*) FROM wbom_cases WHERE related_program_id = $1)
+          + (SELECT COUNT(*) FROM wbom_cash_transactions WHERE program_id = $1)
+          + (SELECT COUNT(*) FROM wbom_whatsapp_messages WHERE related_program_id = $1)
+        )
+        """,
+        program_id,
+    )
+    return int(dep or 0) > 0
+
+
+async def cleanup_exact_confirmed_duplicates(days: int = 30, actor: str = "scheduler") -> dict:
+    """
+    Remove leftover exact duplicates among confirmed programs.
+
+    Keeps the lowest program_id in each duplicate group, attempts hard delete for
+    remaining IDs after removing roster projection rows, and skips rows with
+    dependent references.
+    """
+    groups = await audit_exact_confirmed_duplicates(days=days)
+    if not groups:
+        return {
+            "groups": 0,
+            "kept": [],
+            "deleted": [],
+            "skipped_with_dependencies": [],
+        }
+
+    kept: list[int] = []
+    deleted: list[int] = []
+    skipped_with_dependencies: list[int] = []
+
+    for g in groups:
+        ids = list(g.get("program_ids") or [])
+        if len(ids) < 2:
+            continue
+        keep_id = int(ids[0])
+        kept.append(keep_id)
+        for dup_id in [int(x) for x in ids[1:]]:
+            if await _duplicate_has_dependencies(dup_id):
+                skipped_with_dependencies.append(dup_id)
+                continue
+
+            await execute("DELETE FROM escort_roster_entries WHERE program_id = $1", dup_id)
+            await execute("DELETE FROM wbom_escort_programs WHERE program_id = $1", dup_id)
+            deleted.append(dup_id)
+
+            await log_audit(
+                program_id=dup_id,
+                action="confirmed_exact_duplicate_deleted",
+                old_data={"duplicate_of": keep_id},
+                new_data=None,
+                performed_by=actor,
+                source="cleanup",
+            )
+
+    if deleted or skipped_with_dependencies:
+        log.info(
+            "[cleanup_confirmed_exact_duplicates] groups=%d deleted=%d skipped_with_dependencies=%d",
+            len(groups),
+            len(deleted),
+            len(skipped_with_dependencies),
+        )
+
+    return {
+        "groups": len(groups),
+        "kept": kept,
+        "deleted": deleted,
+        "skipped_with_dependencies": skipped_with_dependencies,
+    }
