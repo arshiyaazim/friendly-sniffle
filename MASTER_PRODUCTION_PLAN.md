@@ -11,12 +11,20 @@ Production database, live messaging, Git commit/push বা service পরিব
 ## বর্তমান অবস্থা
 
 - Target remote: `https://github.com/arshiyaazim/friendly-sniffle.git`
-- Local branch: `master`; এখনো কোনো commit নেই; source ফাইলগুলো untracked।
-- `origin` remote target repository-তে নির্দেশ করে।
-- Public release-এর আগে private/contact-derived data, internal knowledge base,
-  audit/report, legacy archive ও credential scan সম্পন্ন করতে হবে।
-- কোনো commit, push, production database বা service পরিবর্তন এই checklist-এ
-  এখনো সম্পন্ন বলে গণ্য নয়।
+- Local branch: `master`; initial public-release commit
+  `65731f6a5677d16e4f5818f164348afcadb53da8` target repository-তে push হয়েছে।
+- Target repository public; `master` branch remote-এর সাথে synchronized।
+- `.gitignore` internal docs/knowledge base, operational data এবং
+  `tests/e2e/screenshots/`, `tests/fixtures/phase3/` ও generated
+  `tests/coverage-unit.xml`-কে public commit থেকে বাদ দেয়।
+- Credential scan এবং নির্বাচিত Python ফাইলের syntax compilation পাস করেছে।
+  Full unit suite যাচাই হয়নি: Windows-এ `fcntl` অনুপস্থিত, কয়েকটি test
+  dependency নেই, একটি ignored corpus নেই এবং test-schema connection refused;
+  collection-এ 24টি error হয়েছে।
+- Staged whitespace check-এ একাধিক trailing whitespace/blank-line warning
+  পাওয়া গেছে; unrelated formatting পরিবর্তন করা হয়নি।
+- নতুন production database-এ migration, clean-install verification, VPS বা
+  production service পরিবর্তন করা হয়নি।
 
 ## 1. Public release প্রস্তুতি
 
