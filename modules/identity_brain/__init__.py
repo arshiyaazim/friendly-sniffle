@@ -768,8 +768,25 @@ async def _lookup_contact(phone: str) -> Optional[dict]:
     row = await fetch_one(
         """SELECT c.contact_id,
                   c.display_name,
-                  COALESCE(c.relation, 'repeat_client') AS relation_name
+                  -- 2026-11-06: the default is 'unknown', NOT 'repeat_client',
+                  -- and the FK-based wbom_relation_types.relation_name is now
+                  -- preferred over the free-text c.relation column.
+                  --
+                  -- Why both changes: contact_sync never writes c.relation, so
+                  -- every phone-book-saved contact (family/friend/journalist/…)
+                  -- fell through to _map_relation()'s 'repeat_client' fallback
+                  -- and was treated as an existing business client simply for
+                  -- being saved in the owner's phone book. Meanwhile genuinely
+                  -- classified contacts are tagged through relation_type_id
+                  -- (migration 031), which this lookup previously never read —
+                  -- so the accurate source was ignored and the empty one won.
+                  -- relation_type_id (set only by an explicit classification)
+                  -- takes precedence; an unclassified contact is 'unknown'.
+                  COALESCE(NULLIF(rt.relation_name, ''), NULLIF(c.relation, ''), 'unknown')
+                      AS relation_name
               FROM wbom_contacts c
+              LEFT JOIN wbom_relation_types rt
+                     ON rt.relation_type_id = c.relation_type_id
               WHERE c.whatsapp_number = ANY($1)
                 AND COALESCE(c.platform, 'whatsapp') = 'whatsapp'
            ORDER BY c.contact_id DESC
@@ -783,6 +800,13 @@ def _map_relation(relation: str) -> str:
     r = relation.lower()
     if r in ("escort_client", "escort client", "escort buyer", "client_escort_buyer"):
         return "client_escort_buyer"
+    # 2026-11-06: an explicitly-labelled client must still resolve to a client.
+    # Before the default change below, these values only ever reached the
+    # catch-all 'repeat_client' return; now that the catch-all is 'unknown'
+    # they need their own explicit branch, or real clients would silently
+    # stop being recognised.
+    if r in ("client", "repeat client", "repeat_client", "business_client", "customer"):
+        return "repeat_client"
     if r in ("vip", "vip_client"):
         return "vip_client"
     if r == "vendor":
@@ -795,7 +819,12 @@ def _map_relation(relation: str) -> str:
         return "supervisor"
     if r == "family":
         return "family"
-    return "repeat_client"
+    # 2026-11-06: unmapped/empty relation resolves to 'unknown', NOT
+    # 'repeat_client'. The old fallback silently promoted any unrecognised
+    # relation string (and the column default 'unknown') to an existing
+    # business client, giving real strangers/family/friends client tone and
+    # client routing. An unrecognised value must never imply a relationship.
+    return "unknown"
 
 
 def _is_candidate_text(text: str) -> bool:
