@@ -9,6 +9,10 @@ Description=Fazle Core — WhatsApp operations backend
 Documentation=file://@APP_DIR@/README.md
 After=network-online.target postgresql.service
 Wants=network-online.target
+# Crash-loop guard: systemd's default (5 starts / 10s) is easy to trip during a
+# slow database start, and then the unit stays failed with no restart at all.
+StartLimitIntervalSec=120
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -42,6 +46,10 @@ StandardError=append:@APP_DIR@/logs/fazle-core.error.log
 # Deliberately modest hardening: the service owns logs/, backups/, resources/.
 NoNewPrivileges=true
 PrivateTmp=true
+# Everything this service creates (logs, pg_dump backups, exported CSVs) is
+# operator data — .env holds INTERNAL_API_KEY and the bootstrap password. A 022
+# umask would make every new file world-readable on a shared VPS.
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

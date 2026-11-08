@@ -336,6 +336,20 @@ class _FakeSettings:
         self.hermes_alert_investigation_enabled = hermes_alert_investigation_enabled
         self.hermes_alert_investigation_cooldown_seconds = hermes_alert_investigation_cooldown_seconds
 
+    def __getattr__(self, name: str):
+        """Fall back to the real Settings default for anything not stubbed here.
+
+        A strict stub silently rots every time `app/config.py` grows a field the
+        router starts reading (that is how these tests broke on
+        `hermes_admin_grant_timeout_seconds`). Unknown names still raise.
+        """
+        from app.config import Settings
+
+        try:
+            return getattr(Settings(), name)
+        except Exception as exc:  # noqa: BLE001
+            raise AttributeError(name) from exc
+
 
 class TestHermesRelayHandler:
     """Phase 4 (2026-08-04): real Hermes relay, distinct from the AI

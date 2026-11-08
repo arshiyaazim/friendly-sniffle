@@ -22,14 +22,30 @@ OUT OF SCOPE (do NOT add to this file):
   - asserting any new flag / restart / restart-loop behavior
 """
 from __future__ import annotations
-import json, re
+import json, os, re
 from pathlib import Path
 
 import pytest
 
-CORPUS = Path("/home/azim/core/tests/unit/data/recruitment_regression_corpus")
+# Repo-relative, with an env override for checkouts that keep the corpus
+# elsewhere (the real corpus carries candidate data and is not committed).
+CORPUS = Path(
+    os.environ.get(
+        "RECRUITMENT_CORPUS_DIR",
+        Path(__file__).resolve().parent / "data" / "recruitment_regression_corpus",
+    )
+)
 CASES_DIR = CORPUS / "cases"
 INDEX = CORPUS / "index.jsonl"
+
+if not (CORPUS / "_meta" / "corpus_meta.json").is_file():
+    pytest.skip(
+        f"recruitment regression corpus is not present at {CORPUS} "
+        "(set RECRUITMENT_CORPUS_DIR to point at one) — skipping the harness "
+        "instead of breaking collection for the whole suite",
+        allow_module_level=True,
+    )
+
 REQUIRED_FIELDS = json.loads((CORPUS / "_meta" / "corpus_meta.json").read_text())[
     "expected_required_fields"
 ]
