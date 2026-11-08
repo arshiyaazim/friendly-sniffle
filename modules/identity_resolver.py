@@ -401,6 +401,10 @@ def _map_relation(relation: str) -> str:
     r = (relation or "").lower()
     if r in ("escort_client", "escort client", "escort buyer", "client_escort_buyer"):
         return "client_escort_buyer"
+    # 2026-11-06: mirrors identity_brain — an explicitly-labelled client keeps
+    # resolving to repeat_client now that the catch-all is 'unknown'.
+    if r in ("client", "repeat client", "repeat_client", "business_client", "customer"):
+        return "repeat_client"
     if r in ("vip", "vip_client"):
         return "vip_client"
     if r == "vendor":
@@ -413,7 +417,10 @@ def _map_relation(relation: str) -> str:
         return "supervisor"
     if r == "family":
         return "family"
-    return "repeat_client"
+    # 2026-11-06: kept in step with identity_brain._map_relation — an
+    # unmapped/empty relation is 'unknown', never 'repeat_client'. Being a
+    # saved phone-book contact does not make someone an existing client.
+    return "unknown"
 
 
 # ── Sender-name snapshot precedence (Phase-2) ───────────────────────────────────

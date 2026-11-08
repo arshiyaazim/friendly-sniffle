@@ -1,5 +1,9 @@
 # ── Test dependencies for Fazle Core ─────────────────────────────────────────
-# Install: pip install -r tests/requirements-test.txt
+# Test-only tools live here; the application's own runtime dependencies
+# (fastapi, asyncpg, apscheduler, redis, Pillow, openai, …) live in
+# requirements.txt, and the test suite imports the app. Install both:
+#
+#   pip install -r requirements.txt -r tests/requirements-test.txt
 
 # Core test runner
 pytest==8.3.4
@@ -18,6 +22,12 @@ anyio==4.13.0
 
 # DB testing
 asyncpg==0.30.0
+
+# In-memory Redis for tests that exercise Redis-backed paths
+fakeredis==2.26.2
+
+# Vector math in the RAG incremental-index tests (no torch needed)
+numpy>=1.26,<3
 
 # Mock servers
 fastapi==0.115.5

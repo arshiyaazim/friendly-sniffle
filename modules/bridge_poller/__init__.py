@@ -968,6 +968,16 @@ async def _is_draft_always(phone: str, role: str, display_name: str) -> bool:
             return True
     except Exception:
         pass
+    # Owner-set relation registry (migration 090): an explicit 'always_draft'
+    # decision made in the admin UI (or trust_level='blocked', which implies
+    # never_reply and is handled by message_router's silent-skip gate). Same
+    # fail-open contract as the phone_block check above.
+    try:
+        from modules.contact_relations import auto_reply_mode
+        if await auto_reply_mode(phone) == "always_draft":
+            return True
+    except Exception:
+        pass
     # Owner-managed contact group CSV gate (2026-08-24). Fail-open
     # (returns False) if registry unavailable -- per Owner directive
     # section 12, NEVER silently fall back to another contact group.

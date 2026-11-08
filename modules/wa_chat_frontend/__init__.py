@@ -350,19 +350,50 @@ async def get_contact(phone: str, _: None = Depends(_require_api_key)):
         "SELECT whatsapp_number AS phone, display_name, platform, last_seen, updated_at FROM wbom_contacts WHERE whatsapp_number=$1",
         phone,
     )
+    # Owner-set relation (migration 090) is independent of the phone-book row:
+    # the owner may classify a number that the daily sync never imported.
+    relation = await _contact_relation(phone)
     if not row:
-        raise HTTPException(status_code=404, detail="Contact not found")
+        if not relation:
+            raise HTTPException(status_code=404, detail="Contact not found")
+        return {
+            "phone": phone,
+            "display_name": relation.get("display_name") or phone,
+            "platform": "whatsapp",
+            "last_seen": None,
+            "updated_at": None,
+            "auto_reply_blocked": (await get_runtime_setting(f"phone_block.{phone}", "false")) == "true",
+            "relation": relation,
+        }
     d = dict(row)
     d["auto_reply_blocked"] = (await get_runtime_setting(f"phone_block.{phone}", "false")) == "true"
     if d.get("last_seen"):
         d["last_seen"] = d["last_seen"].isoformat()
     if d.get("updated_at"):
         d["updated_at"] = d["updated_at"].isoformat()
+    d["relation"] = relation
     return d
+
+
+async def _contact_relation(phone: str) -> Optional[dict]:
+    """Read-only view of the owner-set relation for the chat contact modal."""
+    try:
+        from modules.contact_relations import resolution
+        return await resolution(phone)
+    except Exception as e:  # fail open — the modal simply shows 'not set'
+        log.debug("[wa_chat] contact relation lookup skipped for %s: %s", phone, e)
+        return None
 
 
 class ContactPatch(BaseModel):
     display_name: Optional[str] = None
+    # Owner-set relation fields (migration 090). Any of these present makes the
+    # PATCH also upsert a fazle_contact_relations row for this phone.
+    relation: Optional[str] = None
+    trust_level: Optional[str] = None
+    auto_reply: Optional[str] = None
+    relation_tone: Optional[str] = None
+    relation_notes: Optional[str] = None
 
 
 @router.patch("/api/wa/contacts/{phone}")
@@ -372,6 +403,21 @@ async def update_contact(phone: str, body: ContactPatch, _: None = Depends(_requ
             "UPDATE wbom_contacts SET display_name=$1, updated_at=NOW() WHERE whatsapp_number=$2",
             body.display_name, phone,
         )
+    if body.relation:
+        from modules.contact_relations import ValidationError, upsert
+
+        try:
+            await upsert(
+                phone=phone,
+                relation=body.relation,
+                trust_level=body.trust_level,
+                auto_reply=body.auto_reply,
+                tone=body.relation_tone,
+                notes=body.relation_notes,
+                actor="wa_chat",
+            )
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"updated": True}
 
 

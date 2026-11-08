@@ -322,6 +322,17 @@ async def _should_silent_skip(sender: str) -> tuple[bool, str]:
     _acct = normalize_phone(settings.accountant_phone) or (settings.accountant_phone or "").strip()
     if _acct and sender == _acct:
         return True, f"accountant phone match ({sender})"
+    # Owner-set relation registry (migration 090): an explicit per-number
+    # 'never_reply' (or trust_level='blocked') outranks every gate below,
+    # including the registered-employee exemption — it is a direct instruction
+    # the owner made in the UI, not an inference about the number. Fails open:
+    # a registry error leaves the pre-existing gates exactly as they were.
+    try:
+        from modules.contact_relations import auto_reply_mode
+        if await auto_reply_mode(sender) == "never_reply":
+            return True, f"owner-set relation: never_reply ({sender})"
+    except Exception as _e:
+        log.debug("[SILENT_SKIP] contact relation lookup error for %s: %s", sender, _e)
     # Reuse the same Owner-managed phone registry as bridge_poller before any
     # name/domain routing. Registered employees remain exempt from this gate.
     try:

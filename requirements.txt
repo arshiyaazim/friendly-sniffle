@@ -9,6 +9,22 @@ python-multipart==0.0.12
 PyYAML==6.0.3
 rapidfuzz==3.10.1
 python-dotenv==1.0.1
+
+# Hard runtime dependency, imported at module scope by modules/scheduler
+# (which app/main.py imports at import time). Omitting it made a clean
+# `pip install -r requirements.txt` install start-fail with
+# ModuleNotFoundError: apscheduler.
+apscheduler==3.10.4
+
+# Used lazily by modules/bridge_poller (reply cooldown) and shared/state_version.
+# Both degrade gracefully when Redis is absent, so this is a soft dependency —
+# declared so a standard install has the code path it was written against.
+redis==5.0.8
+
+# Optional (NOT installed by this file): modules/image_hash enables perceptual
+# duplicate-slip detection when `imagehash` and Pillow are available, and falls
+# back to MD5 content hashing otherwise. Install explicitly if wanted:
+#   pip install imagehash==4.3.1        # pulls scipy + PyWavelets
 PyMuPDF>=1.24.0
 python-docx>=1.1.0
 Pillow>=10.0.0

@@ -71,8 +71,12 @@ yarn-error.log*
 # Generated KB artifacts (produced by scripts/sync_knowledge_base_to_runtime.py)
 resources/generated_kb/
 
-# Reports (private contact/employee data)
-reports/
+# Generated report output (private contact/employee data).
+# Root-anchored deliberately: the unanchored `reports/` form also matched
+# modules/reports/ — the source package imported by app/main.py,
+# modules/admin_commands and modules/scheduler — which meant that code was
+# never committed and a clean checkout could not import the app at all.
+/reports/
 
 # Local infra / GitHub Models integration
 github-models/
@@ -116,7 +120,9 @@ RECRUITMENT_BOT_COORDINATION.md
 /AUDIT_SUMMARY.json
 /recover_critical_numbers.py
 /recover_from_backup.py
-/fazle-core.service
+# No rule for fazle-core.service: that file in the repo root is the unit
+# TEMPLATE (source). install.sh renders it to a temp file and installs the
+# result to /etc/systemd/system — nothing generated ever lands here.
 /fazle-social-auto-reply.service
 
 # Exclude internal Markdown except the sanitized public guides
@@ -127,6 +133,9 @@ RECRUITMENT_BOT_COORDINATION.md
 # Keep one generic scanner; other scripts are operational or data-specific
 /scripts/*
 !/scripts/secret_scan.sh
+# The restart gate is neither: it is covered by unit tests and run by
+# install.sh, so it must ship with the code.
+!/scripts/restart_gate_readiness.py
 
 # Backup files
 backups/

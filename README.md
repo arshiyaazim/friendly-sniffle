@@ -8,61 +8,136 @@ local AI providers.
 
 ## Requirements
 
-- Python 3.11 or newer
-- PostgreSQL
-- Any optional services enabled by the deployment, such as Redis, Qdrant, a
-  WhatsApp bridge, or an AI provider
+- Python 3.11 or newer (`python:3.11-slim` in the `Dockerfile`)
+- PostgreSQL — required; the application reads `DATABASE_URL` at startup
+- Optional, only for the features a deployment actually uses: Redis, Qdrant,
+  a WhatsApp bridge, a Tesseract/ffmpeg toolchain for media processing, and an
+  AI provider (local Ollama or a hosted API)
 
 ## Local setup
 
-From the repository root in PowerShell:
+The commands below are POSIX. The Windows/PowerShell equivalents are noted at
+the end of this section.
 
-```powershell
-py -3.11 -m venv .venv
-.\.venv\Scripts\Activate.ps1
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-Set the remaining environment variables for the services and features you
-intend to use. Keep credentials in an untracked environment file or a secrets
-manager; never put production values in source control.
-For a starting template, copy `.env.example` to `.env` and replace its
-placeholder values before running the application.
+`requirements.txt` is sufficient to run the application. It includes the
+scheduler dependency (`apscheduler`, imported while `app/main.py` is imported),
+the Redis client, and the media/document libraries. The only value you must
+supply yourself is the one marked required in [`app/config.py`](app/config.py)
+— at minimum `DATABASE_URL`.
+
+Configuration: copy `.env.example` to `.env` and fill in what you need. Every
+field in `app/config.py`, plus every environment variable that a module reads
+directly, is documented there. The advanced entries are commented out and show
+the default the code already applies, so an unmodified copy changes nothing
+(and an uncommented empty value such as `KEY=` does override a default with an
+empty string — uncomment only what you intend to set). Keep real credentials in
+an untracked `.env` or a secrets manager; never put production values in source
+control.
 
 Review pending migrations, then apply them to a new, empty PostgreSQL database:
 
-```powershell
-python db/migrate.py --dry-run
-python db/migrate.py
+```bash
+python db/migrate.py --dry-run                              # inventory only — no database needed
+DATABASE_URL=postgresql://… python db/migrate.py --dry-run  # what is actually pending
+DATABASE_URL=postgresql://… python db/migrate.py            # apply
 ```
 
-The dry run lists pending migration files; it does not validate their SQL.
+The dry run never applies SQL and does not validate it. With `DATABASE_URL` set
+it is read-only as well: it compares against `schema_migrations` without
+creating that table just to look. Without `DATABASE_URL` it prints the local
+inventory and says plainly that "pending" can only be answered by a database.
 Always rehearse a clean install against a disposable database before using a
-production database.
+production one.
 
 Start the API locally:
 
-```powershell
+```bash
+python run.py                     # honours APP_PORT / DEBUG / LOG_LEVEL from settings
+# or
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8200
 ```
 
+`run.py` binds loopback, which is what you want locally or behind a reverse
+proxy. The container image binds `0.0.0.0:8200` (see `Dockerfile`).
+
+**Windows / PowerShell:** use `py -3.11 -m venv .venv` and
+`.\.venv\Scripts\Activate.ps1` for the first two lines; every other command is
+identical.
+
+### Docker and the VPS installer
+
+```bash
+docker build -t fazle-core .
+docker run --env-file .env -p 8200:8200 fazle-core
+```
+
+`install.sh` is the VPS path. It creates the venv, installs `requirements.txt`,
+renders `fazle-core.service` for wherever the checkout actually lives
+(`@APP_DIR@` / `@RUN_USER@` are substituted, never shipped raw), installs and
+starts the unit, and then waits for the restart gate before declaring success:
+
+```bash
+bash install.sh                       # APP_DIR / RUN_USER / PYTHON_BIN may be overridden
+```
+
+The unit writes uvicorn's stderr to `logs/fazle-core.error.log` and reads
+`<repo>/.env` (plus the app's own `.env` loading). For a real deployment, follow
+[`MASTER_PRODUCTION_PLAN.md`](MASTER_PRODUCTION_PLAN.md) rather than the script
+alone.
+
+### Restart gate
+
+`systemctl restart` returning is not proof of a working deploy. The gate checks
+the process state, the restart counter (crash-loop detection), the stderr log
+for a completed startup or an unhandled traceback, and `/health`:
+
+```bash
+BEFORE=$(systemctl show -p NRestarts --value fazle-core)
+sudo systemctl restart fazle-core
+python -m scripts.restart_gate_readiness --restarts-before "$BEFORE"
+```
+
+Exit code 0 means ready. Crucially, a 503 whose only failing probes are `cpu`,
+`disk`, or `mem` counts as **ready** — those are host-level (`ambient`) signals,
+reported but never treated as a deploy failure. Failing core probes (`db`,
+bridges, `outbound`, `scheduler`) do fail the gate, after a bounded settle
+window so a transient blip during startup is not fatal either.
+
 ## Tests
 
-```powershell
-python -m pip install -r tests/requirements-test.txt
+Test tooling lives in a separate file, and the suite imports the application, so
+install both:
+
+```bash
+python -m pip install -r requirements.txt -r tests/requirements-test.txt
 python -m pytest tests/unit/ -m unit
 ```
 
-Integration, database, and end-to-end tests may require additional services;
-consult the test configuration before running them.
+`make install` does the same, and the Makefile wraps the common runs
+(`make test-unit`, `make test-integration`, `make test-resilience`,
+`make test-docker`). Two pytest configs exist by design: the root `pytest.ini`
+covers root-level invocations and restricts collection to the non-e2e test
+directories, while `tests/pytest.ini` applies when you pass `tests/`-prefixed
+paths. Both set `asyncio_mode = auto`; `tests/conftest.py` carries the
+collection guard that keeps e2e tests out of ordinary runs.
+
+Integration, database, and end-to-end tests require real services — PostgreSQL,
+Redis, and the mock bridges. See `tests/conftest.py` and
+`docker-compose.test.yml` before running them.
 
 ## Configuration and deployment
 
 Application settings are defined in [`app/config.py`](app/config.py). Use
-environment variables or a deployment secrets manager for credentials,
-provider API keys, bridge addresses, and contact identifiers. The app should
-remain in a non-sending mode until bridge configuration, authorization, and
-message-routing tests have passed.
+environment variables or a deployment secrets manager for credentials, provider
+API keys, bridge addresses, and contact identifiers. The app should remain in a
+non-sending mode until bridge configuration, authorization, and message-routing
+tests have passed.
 
 For the staged clean-install, migration, bridge, AI-provider, verification, and
 rollback checklist, see [`MASTER_PRODUCTION_PLAN.md`](MASTER_PRODUCTION_PLAN.md).
