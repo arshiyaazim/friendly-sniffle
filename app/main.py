@@ -27,7 +27,8 @@ from typing import Any, Optional
 from urllib.parse import urlsplit
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, Response, Depends, File, Form, UploadFile
+from fastapi import (FastAPI, HTTPException, Request, Response, Depends, File, Form,
+                     Header, UploadFile)
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -349,6 +350,22 @@ async def lifespan(app: FastAPI):
             "requests (WEBHOOK_SIGNATURE_ENFORCEMENT=false). Do not expose those paths "
             "publicly, or set BRIDGE_WEBHOOK_SECRET and WEBHOOK_SIGNATURE_ENFORCEMENT=true."
         )
+    # Access-control posture, in the same voice: say what is on and what is off.
+    if settings.internal_key_allow_remote:
+        log.warning(
+            "[security] INTERNAL_KEY_ALLOW_REMOTE is on — the owner key is accepted from "
+            "any address. Prefer fk_ API tokens for remote callers."
+        )
+    if not settings.rbac_write_guard:
+        log.warning(
+            "[security] RBAC_WRITE_GUARD is off — any valid API token can write, even if "
+            "its account is disabled or has no role."
+        )
+    if not (settings.metrics_token or "").strip():
+        log.info(
+            "[security] /metrics has no token (loopback scrape assumed). Set METRICS_TOKEN "
+            "before the port is reachable from another host."
+        )
     # WhatsApp Chat UI — ensure runtime settings + groups tables exist
     try:
         await ensure_wa_chat_tables()
@@ -585,6 +602,132 @@ def _route_template(request: Request) -> str:
     except Exception:
         pass
     return request.url.path
+
+
+# ── Access-control hardening (2026-11-06 audit) ───────────────────────────────
+# Two gaps the audit named and these middlewares close:
+#   1. the owner key (INTERNAL_API_KEY) was accepted from any address, because
+#      nothing looked at who was calling — a leaked server secret was enough;
+#   2. 195 routes accept "any valid key" as authorization, so a token whose
+#      admin has been deactivated (or never had a role) could still write.
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+_WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+# Writes that legitimately carry no account identity: inbound webhooks (verified
+# by HMAC/bearer inside the handler), the login endpoint itself, the SPA
+# heartbeat, and the service-to-service AI policy endpoints.
+_WRITE_GUARD_EXEMPT = (
+    "/webhook/",
+    "/api/admin/login",
+    "/login",
+    "/api/frontend/heartbeat",
+    "/ai-policy/",
+)
+_ROLE_CACHE: dict[str, tuple[float, int]] = {}
+_ROLE_CACHE_TTL_S = 60.0
+
+
+def _is_loopback(host: str | None) -> bool:
+    """Missing client info counts as loopback: TestClient and in-process calls."""
+    if not host:
+        return True
+    host = host.strip().strip("[]")
+    return host in _LOOPBACK_HOSTS or host.startswith("127.")
+
+
+def _write_guard_needed(method: str, path: str) -> bool:
+    """Is this request subject to the identity check (before looking at the key)?"""
+    if method.upper() not in _WRITE_METHODS:
+        return False
+    return not any(path == p or path.startswith(p) for p in _WRITE_GUARD_EXEMPT)
+
+
+def _is_owner_key(key: str | None) -> bool:
+    configured = settings.internal_api_key or ""
+    if not key or not configured:
+        return False
+    return hmac.compare_digest(key, configured)
+
+
+async def _token_role_level(key: str) -> int:
+    """Highest role level of an ``fk_...`` token, cached briefly.
+
+    0 means "not an active admin, or no role at all" — the caller must not be
+    trusted for a write.
+    """
+    now = time.monotonic()
+    cached = _ROLE_CACHE.get(key)
+    if cached and now - cached[0] < _ROLE_CACHE_TTL_S:
+        return cached[1]
+    from modules import rbac
+
+    level = 0
+    admin = await rbac.get_admin_by_api_key(key)
+    if admin and admin.get("status") == "active" and admin.get("id"):
+        level = await rbac.max_role_level(admin["id"])
+    if len(_ROLE_CACHE) > 4096:      # tokens are long-lived; a cap keeps it bounded
+        _ROLE_CACHE.clear()
+    _ROLE_CACHE[key] = (now, level)
+    return level
+
+
+@app.middleware("http")
+async def owner_key_scope(request: Request, call_next):
+    """The owner key is a server secret: loopback only unless explicitly allowed."""
+    key = request.headers.get("X-Internal-Key")
+    if _is_owner_key(key) and not settings.internal_key_allow_remote:
+        host = request.client.host if request.client else None
+        if not _is_loopback(host):
+            log.warning(
+                "[auth] owner key refused from %s (%s %s) — loopback only",
+                host, request.method, request.url.path,
+            )
+            return JSONResponse(
+                status_code=403,
+                content={"detail": (
+                    "INTERNAL_API_KEY is only accepted from loopback. Use an "
+                    "fk_ API token for this caller, or set "
+                    "INTERNAL_KEY_ALLOW_REMOTE=1 if the caller is genuinely trusted."
+                )},
+            )
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def write_identity_guard(request: Request, call_next):
+    """A mutating request with an API token must belong to an active, rolled admin.
+
+    Requests without a token are left alone: the route's own dependency decides
+    whether anonymous access is allowed (webhooks, login, health).
+    """
+    path = request.url.path
+    if not settings.rbac_write_guard or not _write_guard_needed(request.method, path):
+        return await call_next(request)
+    key = request.headers.get("X-Internal-Key")
+    if not key or _is_owner_key(key):
+        return await call_next(request)
+    try:
+        level = await _token_role_level(key)
+    except Exception as exc:  # noqa: BLE001 - database trouble must not 500
+        log.warning("[auth] write guard lookup failed for %s: %s", path, exc)
+        return JSONResponse(status_code=503, content={"detail": "authorization unavailable"})
+    minimum = max(0, int(settings.rbac_write_min_level or 0))
+    if minimum and level < minimum:
+        log.warning("[auth] write refused: role level %s < %s (POST %s)",
+                    level, minimum, path)
+        return JSONResponse(
+            status_code=403,
+            content={"detail": (
+                f"this API token's account has role level {level}; writes need at "
+                f"least {minimum} (RBAC_WRITE_MIN_LEVEL)"
+            )},
+        )
+    if level <= 0:
+        # Audit mode: names exactly which caller would lose access if the switch
+        # were raised, without breaking them first.
+        log.warning("[auth][audit] token with no role wrote %s %s — it would be "
+                    "refused once RBAC_WRITE_MIN_LEVEL > 0",
+                    request.method, path)
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -6136,8 +6279,23 @@ async def api_llm_stats():
 
 # ── Batch 22 — Observability endpoints ────────────────────────────────────────
 @app.get("/metrics")
-async def metrics_prometheus():
-    """Prometheus text exposition (unauthenticated for scraping; bind 127.0.0.1)."""
+async def metrics_prometheus(
+    authorization: str | None = Header(default=None),
+    x_metrics_token: str | None = Header(default=None),
+):
+    """Prometheus text exposition.
+
+    Loopback scraping needs no credentials. Set METRICS_TOKEN to require one —
+    mandatory the moment the port is reachable from anywhere else, because the
+    exposition leaks route names, error counts and latency.
+    """
+    required = (settings.metrics_token or "").strip()
+    if required:
+        supplied = (x_metrics_token or "").strip()
+        if not supplied and authorization:
+            supplied = authorization.removeprefix("Bearer ").strip()
+        if not supplied or not hmac.compare_digest(supplied, required):
+            raise HTTPException(status_code=401, detail="metrics token required")
     from fastapi.responses import PlainTextResponse
     return PlainTextResponse(obs.render_prometheus(), media_type="text/plain; version=0.0.4")
 

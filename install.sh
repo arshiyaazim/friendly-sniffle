@@ -25,7 +25,7 @@
 # Overridable: APP_DIR (defaults to this script's directory), RUN_USER
 # (defaults to $SUDO_USER, else the current user), PYTHON_BIN, UNIT_NAME,
 # APP_PORT, DATABASE_URL, SKIP_DB_CHECKS=1, ALLOW_INCOMPLETE_SCHEMA=1,
-# SKIP_PRE_MIGRATION_BACKUP=1, BACKUP_DIR, NO_CPU_TORCH=1.
+# SKIP_PRE_MIGRATION_BACKUP=1, BACKUP_DIR, NO_CPU_TORCH=1, STRICT_DB_ISOLATION=1.
 #
 # For anything beyond a single-host install, follow MASTER_PRODUCTION_PLAN.md.
 
@@ -249,6 +249,32 @@ else
 fi
 if [ "$DB_STATUS" -ne 0 ]; then
   die "database preflight failed — fix the above (or SKIP_DB_CHECKS=1 bash install.sh)"
+fi
+
+# 3b-ii. Database isolation. The app assumes one database per deployment with a
+# single `public` schema; nothing else verifies that, and on a shared VPS a
+# second application in the same database silently breaks ownership and
+# migrations. Warnings are advisory (a shared *server* is fine), a shared
+# *database* or a superuser role is not. STRICT_DB_ISOLATION=1 makes them fatal.
+if [ "${SKIP_DB_CHECKS:-0}" != "1" ] && [ -x "$VENV_DIR/bin/python" ] && \
+   [ -f "$APP_DIR/scripts/verify_isolation.py" ]; then
+  ISOLATION_RC=0
+  DATABASE_URL="$DATABASE_URL" "$VENV_DIR/bin/python" \
+    "$APP_DIR/scripts/verify_isolation.py" > /tmp/fazle-isolation.$$ 2>&1 || ISOLATION_RC=$?
+  cat /tmp/fazle-isolation.$$
+  rm -f /tmp/fazle-isolation.$$
+  if [ "$ISOLATION_RC" -eq 2 ]; then
+    if [ "${STRICT_DB_ISOLATION:-0}" = "1" ]; then
+      die "database is not isolated (see ✗ above) — fix it, or ALLOW shared DB with STRICT_DB_ISOLATION=0"
+    fi
+    warn "database isolation check found problems (see ✗ above) — the app still works,"
+    warn "but a shared database/superuser role defeats the schema assumptions."
+    warn "STRICT_DB_ISOLATION=1 makes this fatal."
+  elif [ "$ISOLATION_RC" -ne 0 ]; then
+    warn "database isolation check could not run (exit $ISOLATION_RC) — continuing"
+  fi
+else
+  warn "database isolation check skipped (no venv/script or SKIP_DB_CHECKS=1)"
 fi
 
 if [ "$PREFLIGHT_ONLY" -eq 1 ]; then

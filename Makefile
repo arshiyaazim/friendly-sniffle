@@ -120,6 +120,15 @@ test-docker:
 	  --exit-code-from test-runner \
 	  test-runner
 
+# Full suite against a local test database (postgres-test from the compose file,
+# or any PostgreSQL you point TEST_DATABASE_URL at). REQUIRE_TEST_DB=1 turns a
+# missing database into a failure instead of a skip — that is what CI wants.
+.PHONY: test-local
+test-local:
+	REQUIRE_TEST_DB=1 TEST_DB_PASSWORD="$${TEST_DB_PASSWORD:?set TEST_DB_PASSWORD (docker compose reads the same variable)}" \
+	  $(PYTEST) tests/unit tests/integration tests/db tests/workflows \
+	  -m "not e2e and not load" --timeout=90 $(BASE_ARGS)
+
 .PHONY: test-docker-down
 test-docker-down:
 	docker compose -f docker-compose.test.yml down -v
@@ -139,6 +148,21 @@ smoke:
 	  --no-header \
 	  --no-cov \
 	  -x
+
+# ─── Show coverage summary ───────────────────────────────────────────────────
+.PHONY: db-isolation
+db-isolation:
+	@test -n "$(DATABASE_URL)" || (echo "DATABASE_URL is required"; exit 1)
+	$(PYTHON) scripts/verify_isolation.py
+
+.PHONY: restore-drill
+restore-drill:
+	@test -n "$(DATABASE_URL)" || (echo "DATABASE_URL is required"; exit 1)
+	$(PYTHON) scripts/restore_drill.py
+
+.PHONY: bridge-smoke
+bridge-smoke:
+	$(PYTHON) scripts/bridge_smoke.py
 
 # ─── Show coverage summary ───────────────────────────────────────────────────
 .PHONY: cov-report

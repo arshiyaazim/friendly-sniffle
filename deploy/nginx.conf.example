@@ -1,0 +1,115 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# fazle-core — reference nginx site (2026-11-06 operational audit)
+#
+# This is the compensating control for what the app itself does not do:
+#   * /metrics is unauthenticated (loopback scrape by design) -> deny it here,
+#     or set METRICS_TOKEN in .env and scrape with a bearer token;
+#   * the bridge webhooks accept unsigned POSTs until
+#     WEBHOOK_SIGNATURE_ENFORCEMENT=true -> keep them off the public listener;
+#   * only /api/admin/login is throttled in-app -> rate-limit the rest here;
+#   * uvicorn reads whole bodies -> cap them here.
+#
+# Install: copy to /etc/nginx/sites-available/fazle-core, edit the domain, TLS
+# paths and the allow-lists, then `nginx -t && systemctl reload nginx`.
+# The app must be listening on 127.0.0.1:8200 (run.py does exactly that).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Rate-limit zones live at http{} scope — put these lines in /etc/nginx/nginx.conf
+# if this file is included inside a server{} block only:
+#
+#   limit_req_zone $binary_remote_addr zone=fazle_login:10m rate=10r/m;
+#   limit_req_zone $binary_remote_addr zone=fazle_api:10m   rate=20r/s;
+#   limit_req_zone $binary_remote_addr zone=fazle_webhook:10m rate=60r/s;
+
+upstream fazle_core {
+    server 127.0.0.1:8200;
+    keepalive 32;
+}
+
+# Plain HTTP: nothing but the redirect, and the ACME challenge if you use it.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name pay.example.com;
+
+    location /.well-known/acme-challenge/ { root /var/www/html; }
+    location / { return 301 https://$host$request_uri; }
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name pay.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/pay.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/pay.example.com/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+
+    # uvicorn reads the whole request body into memory before the route runs.
+    client_max_body_size 12m;
+    client_body_timeout  30s;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+
+    access_log /var/log/nginx/fazle-core.access.log;
+    error_log  /var/log/nginx/fazle-core.error.log warn;
+
+    # ── Never proxied ────────────────────────────────────────────────────────
+    # Metrics expose route names, error counts and latency. Scrape from the host
+    # itself over 127.0.0.1:8200, or set METRICS_TOKEN and allow one source.
+    location = /metrics {
+        # allow 10.0.0.5;      # <- your Prometheus host, if any
+        # auth_basic "metrics"; auth_basic_user_file /etc/nginx/.htpasswd-metrics;
+        deny all;
+    }
+    location = /metrics/json    { deny all; }
+    location /observability/    { deny all; }
+    location = /debug/auth-check { deny all; }
+
+    # ── Webhooks ─────────────────────────────────────────────────────────────
+    # Meta (WhatsApp Cloud API) can stay public: signatures are enforced by
+    # default (META_WEBHOOK_SIGNATURE_ENFORCEMENT=true).
+    location = /webhook/meta {
+        limit_req zone=fazle_webhook burst=20 nodelay;
+        proxy_pass http://fazle_core;
+        include /etc/nginx/proxy_params;
+    }
+
+    # The local bridges are on this host or a known one — do NOT leave these on
+    # the public listener while WEBHOOK_SIGNATURE_ENFORCEMENT is false, because
+    # an unsigned POST would be accepted.
+    location ^~ /webhook/mcp {
+        allow 127.0.0.1;
+        allow 10.0.0.0/8;        # <- your private network, adjust
+        deny all;
+        limit_req zone=fazle_webhook burst=40 nodelay;
+        proxy_pass http://fazle_core;
+        include /etc/nginx/proxy_params;
+    }
+
+    # ── Login ────────────────────────────────────────────────────────────────
+    # The app limits 8 failures / 15 min per username+IP; this is the second
+    # layer, and it also covers password spraying across usernames.
+    location = /api/admin/login {
+        limit_req zone=fazle_login burst=5 nodelay;
+        proxy_pass http://fazle_core;
+        include /etc/nginx/proxy_params;
+    }
+
+    # ── Everything the browser uses ──────────────────────────────────────────
+    location /api/ {
+        limit_req zone=fazle_api burst=40 nodelay;
+        proxy_pass http://fazle_core;
+        include /etc/nginx/proxy_params;
+        proxy_read_timeout 120s;     # AI console and report endpoints are slow
+    }
+
+    location / {
+        limit_req zone=fazle_api burst=60 nodelay;
+        proxy_pass http://fazle_core;
+        include /etc/nginx/proxy_params;
+    }
+}

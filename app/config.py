@@ -164,6 +164,32 @@ class Settings(BaseSettings):
     internal_api_key: str = ""
     ai_console_chat_enabled: bool = False
 
+    # ── Access-control hardening (2026-11-06 audit) ─────────────────────────
+    # The owner key (INTERNAL_API_KEY) is a server secret, not a person's login.
+    # It is only accepted from loopback by default; a reverse proxy on the same
+    # host still works (it connects from 127.0.0.1). Set
+    # INTERNAL_KEY_ALLOW_REMOTE=1 only when a trusted host genuinely needs it.
+    internal_key_allow_remote: bool = False
+
+    # Central guard for mutating requests (195 key-only routes, audit 2026-11-06).
+    # Requests without a key are untouched — the route's own dependency decides.
+    # RBAC_WRITE_MIN_LEVEL is the *minimum role level* a token needs to write:
+    #   0  (default) audit only — a token whose account has no role still writes,
+    #      but every such write is logged so you can see who would be affected
+    #      before tightening this on a live system;
+    #   10+ enforce — a roleless/disabled account is refused (403). Turning this
+    #      on by default would break real callers: the project's own suite shows
+    #      /api/fpe/operator/submit, /admin/users/{phone}/enable and
+    #      /scheduler/run/{job} writing with roleless tokens.
+    # Start at 0, watch the [auth][audit] lines, grant roles, raise the number.
+    rbac_write_guard: bool = True
+    rbac_write_min_level: int = 0
+
+    # /metrics is unauthenticated because the scrape is loopback-only. Set
+    # METRICS_TOKEN to require `Authorization: Bearer <token>` (or
+    # `X-Metrics-Token`) — mandatory if the port is ever reachable elsewhere.
+    metrics_token: str = ""
+
     # RAG startup control: BM25 is always built by the startup task, while
     # Qdrant synchronization can be disabled independently. The default is
     # False so an unset RAG_STARTUP_QDRANT_SYNC_ENABLED leaves Qdrant untouched

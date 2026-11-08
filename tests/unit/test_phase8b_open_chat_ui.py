@@ -6,7 +6,7 @@ import pytest
 
 
 def test_open_chat_ui_contains_phase8b_console_sections():
-    html = Path("/home/azim/core/app/static/open-chat.html").read_text()
+    html = (Path(__file__).resolve().parents[2] / "app" / "static" / "open-chat.html").read_text()
 
     assert "Fazle AI Operating Console" in html
     assert 'id="left-panel"' in html
@@ -20,7 +20,7 @@ def test_open_chat_ui_contains_phase8b_console_sections():
 
 
 def test_open_chat_ui_consumes_phase8a_metadata_fields():
-    html = Path("/home/azim/core/app/static/open-chat.html").read_text()
+    html = (Path(__file__).resolve().parents[2] / "app" / "static" / "open-chat.html").read_text()
 
     for token in (
         "feature_path",

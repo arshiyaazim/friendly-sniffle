@@ -110,6 +110,10 @@ def test_known_gap_list_matches_the_real_blockers():
         "fazle_knowledge_base.status",
         "fazle_payment_drafts.employee_phone",
         "role fazle_ai_reader",
+        # found by a real virgin build on 2026-11-06, not by reading the code
+        "wbom_employees",
+        "wbom_escort_programs",
+        "fazle_contact_roles",
     }
     assert set(mod.KNOWN_MISSING_OBJECTS) == expected
     assert set(mod.VIRGIN_NOOP_FILES) == {"086_k32_recruitment_reconciliation.sql"}
