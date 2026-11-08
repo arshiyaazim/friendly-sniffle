@@ -71,8 +71,12 @@ yarn-error.log*
 # Generated KB artifacts (produced by scripts/sync_knowledge_base_to_runtime.py)
 resources/generated_kb/
 
-# Reports (private contact/employee data)
-reports/
+# Generated report output (private contact/employee data).
+# Root-anchored deliberately: the unanchored `reports/` form also matched
+# modules/reports/ — the source package imported by app/main.py,
+# modules/admin_commands and modules/scheduler — which meant that code was
+# never committed and a clean checkout could not import the app at all.
+/reports/
 
 # Local infra / GitHub Models integration
 github-models/
