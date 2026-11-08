@@ -317,6 +317,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"[wa_chat] table init failed (non-fatal): {e}")
     await start_pollers()
+    # 2026-11-06 — one-time bridge-store history import (opt-in). Runs AFTER
+    # the pollers so live traffic keeps flowing; the importer never routes or
+    # replies, and each bridge is imported once (state table in migration 091).
+    try:
+        from modules.history_backfill import autostart_enabled, startup_backfill
+        if autostart_enabled():
+            asyncio.create_task(startup_backfill(), name="bridge-history-backfill")
+            log.info("[history_backfill] autostart scheduled")
+    except Exception as e:
+        log.warning(f"[history_backfill] autostart unavailable (non-fatal): {e}")
     outbound_queue.start_background_worker()
     fazle_scheduler.start_scheduler()
     # Ollama daemon client — persistent keep-alive client + async model warmup.
@@ -2355,6 +2365,83 @@ async def bridge_probe(_key: str = Depends(require_api_key)):
     return {"probed": True, **diag, "ts": time.time()}
 
 
+# ── Bridge store history import (2026-11-06) ─────────────────────────────────
+# First-connection data completeness: a freshly paired bridge already contains
+# the conversation history in its own SQLite store. modules.history_backfill
+# imports it into wbom_whatsapp_messages + the identity/contact tables WITHOUT
+# routing, replying or triggering anything. See the README section
+# "Connecting a WhatsApp bridge (WhatsApp MCP) and the first import".
+@app.post("/api/bridge/history-backfill", dependencies=[Depends(require_api_key)])
+async def api_bridge_history_backfill(body: dict | None = None):
+    """Start (or resume) the one-time history import.
+
+    Body (all optional):
+      bridge            "all" | bridge1 | bridge2 | bridge3   (default "all")
+      since             ISO date; default = BRIDGE_HISTORY_BACKFILL_SINCE or the
+                        whole store
+      until             ISO date (optional upper bound)
+      include_outbound  bool, default true  — also import is_from_me=1 messages
+      include_groups    bool, default false — only approved group JIDs are kept
+      max_messages      int  — pause after N messages (resumable)
+      reset             bool — start this bridge from rowid 0 again
+      dry_run           bool — count only, never write
+      sync              bool — wait for completion instead of running in the
+                        background (default false: returns immediately)
+    """
+    from datetime import datetime, timezone
+    from modules import history_backfill as hb
+
+    body = body or {}
+
+    def _parse(value):
+        if not value:
+            return None
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"invalid ISO date: {value!r}")
+
+    bridge = (body.get("bridge") or "all").strip()
+    known = {"bridge1", "bridge2", "bridge3"}
+    if bridge not in known | {"all"}:
+        raise HTTPException(status_code=400, detail=f"unknown bridge {bridge!r}")
+    kwargs = {
+        "since": _parse(body.get("since")),
+        "until": _parse(body.get("until")),
+        "include_outbound": bool(body.get("include_outbound", True)),
+        "include_groups": bool(body.get("include_groups", False)),
+        "max_messages": int(body["max_messages"]) if body.get("max_messages") else None,
+        "reset": bool(body.get("reset", False)),
+        "dry_run": bool(body.get("dry_run", False)),
+    }
+    targets = sorted(known) if bridge == "all" else [bridge]
+
+    async def _run() -> list[dict]:
+        out = []
+        for name in targets:
+            try:
+                out.append(await hb.backfill_bridge(name, **kwargs))
+            except Exception as exc:  # noqa: BLE001
+                log.exception("[history_backfill] %s failed: %s", name, exc)
+                out.append({"bridge": name, "status": "failed", "error": str(exc)[:300]})
+        return out
+
+    if body.get("dry_run") or body.get("sync"):
+        return {"results": await _run(), "targets": targets}
+    asyncio.create_task(_run(), name="bridge-history-backfill-manual")
+    return {"accepted": True, "targets": targets,
+            "note": "running in background; poll GET /api/bridge/history-backfill/status"}
+
+
+@app.get("/api/bridge/history-backfill/status", dependencies=[Depends(require_api_key)])
+async def api_bridge_history_backfill_status(bridge: str | None = None):
+    from modules import history_backfill as hb
+    return {"autostart": hb.autostart_enabled(),
+            "since_env": str(hb.env_since() or ""),
+            "bridges": await hb.get_status(bridge)}
+
+
 # ── Phase 13E — Self-Healing Runtime diagnostics ──────────────────────────────
 @app.get("/api/self-heal/diagnostics", dependencies=[Depends(require_api_key)])
 async def self_heal_diagnostics():
@@ -2781,7 +2868,8 @@ async def _finish_meta_inbound(msg, sender, text, message_id, queue_key, msg_typ
                     await _save_draft("meta", sender, reply, "recruitment")
                     return
                 if qid:
-                    await _save_message("meta", sender, reply, direction="outbound", actor_type="automation")
+                    await _save_message("meta", sender, reply, direction="outbound",
+                                        actor_type="automation", outbound_queue_id=qid)
                     await _record_meta_delivery_state(message_id, "queued")
                     log.info("[META] queued recruitment reply sender=%s qid=%s", sender, qid)
                 else:

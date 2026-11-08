@@ -31,6 +31,15 @@ from shared.reply_policy import (
     build_whatsapp_recruitment_policy,
 )
 
+def _record_ai_provenance(provider: str, model: str, task: str) -> None:
+    """2026-11-06 — outbound provenance (see modules.ai_provenance). Never raises."""
+    try:
+        from modules import ai_provenance
+        ai_provenance.record_success(provider, model, task=task)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 log = logging.getLogger("fazle.minimax")
 
 _minimax_sem = asyncio.Semaphore(2)
@@ -88,6 +97,7 @@ async def generate_reply(
             reply_text = (resp.choices[0].message.content or "").strip()
             latency_ms = int((time.monotonic() - t0) * 1000)
             log.info("[minimax] generate_reply OK latency=%dms intent=%s", latency_ms, intent)
+            _record_ai_provenance("minimax", model, "reply")
             return reply_text
         except asyncio.TimeoutError as e:
             log.warning("[minimax] generate_reply timeout: %s", type(e).__name__)
@@ -140,6 +150,7 @@ async def generate_recruitment_reply(
             reply_text = (resp.choices[0].message.content or "").strip()
             latency_ms = int((time.monotonic() - t0) * 1000)
             log.info("[minimax] generate_recruitment_reply OK latency=%dms", latency_ms)
+            _record_ai_provenance("minimax", model, "recruitment_reply")
             return reply_text
         except asyncio.TimeoutError as e:
             log.warning("[minimax] generate_recruitment_reply timeout: %s", type(e).__name__)

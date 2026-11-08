@@ -137,6 +137,17 @@ async def enqueue(
     from modules.message_router import inbound_reference, record_inbound_action
     reference = inbound_reference()
     meta = {**reference, **(meta or {})}
+    # 2026-11-06 — outbound provenance. If an LLM produced this body moments
+    # ago in THIS task, freeze that fact onto the queue row: the row outlives
+    # the task, and the actual send happens later in the dispatcher's own
+    # task where the ContextVar is no longer visible. Never overrides a value
+    # the caller already set.
+    try:
+        from modules import ai_provenance
+        if "ai_generated" not in meta:
+            meta.update(ai_provenance.provenance_meta())
+    except Exception as _prov_exc:  # noqa: BLE001
+        log.debug("[OUTBOUND_ENQUEUE] provenance snapshot skipped: %s", _prov_exc)
     if reference and not idempotency_key:
         action = hashlib.sha256(
             json.dumps([recipient, source_bridge, purpose, body], ensure_ascii=False).encode()
@@ -623,6 +634,10 @@ async def sweep_once(limit: int = 20) -> dict:
                 continue
             auth_token = issue_transport_authorization(auth_result.decision)
 
+            # _bridge_used tracks the bridge that ACTUALLY accepted the send
+            # (it differs from r["source_bridge"] on failover) — that is what
+            # the canonical outbound row must record, 2026-11-06.
+            _bridge_used = r["source_bridge"]
             try:
                 try:
                     external_id = await _send_with_channel(
@@ -657,6 +672,7 @@ async def sweep_once(limit: int = 20) -> dict:
                         fallback, r["recipient"], r["body"],
                         authorization=fallback_token,
                     )
+                    _bridge_used = fallback
                 await conn.execute(
                     """UPDATE fazle_outbound_queue
                           SET status='sent', attempts=$2, sent_at=NOW(), last_error=NULL,
@@ -683,6 +699,44 @@ async def sweep_once(limit: int = 20) -> dict:
                 except Exception as projection_error:
                     log.error("Accepted queue id=%s; draft projection failed: %s", rid, projection_error)
                 _meta_outbound_log("meta_outbound_sent", source_bridge=r["source_bridge"], queue_id=rid, attempts=attempts)
+
+                # 2026-11-06 — canonical outbound persistence at the transport
+                # boundary. This is the ONLY place a message actually leaves the
+                # system, so it is the only place that can record (a) which
+                # bridge really carried it after any failover, (b) that delivery
+                # was accepted, and (c) whether an LLM wrote it. Never allowed to
+                # undo or retry an already-successful send.
+                try:
+                    _q_meta = r.get("meta_json") or {}
+                    if isinstance(_q_meta, str):
+                        import json as _json
+                        _q_meta = _json.loads(_q_meta)
+                    from modules.bridge_poller import persist_outbound_message
+                    await persist_outbound_message(
+                        source_bridge=_bridge_used,
+                        recipient=r["recipient"],
+                        text=r["body"],
+                        actor_type="automation",
+                        ai_generated=(
+                            bool(_q_meta.get("ai_generated"))
+                            if "ai_generated" in _q_meta else "auto"
+                        ),
+                        ai_provider=_q_meta.get("ai_provider"),
+                        ai_model=_q_meta.get("ai_model"),
+                        ai_task=_q_meta.get("ai_task"),
+                        outbound_queue_id=rid,
+                        external_id=external_id or "",
+                        delivery_status="sent",
+                        purpose=r.get("purpose") or "",
+                        failover_from=(r["source_bridge"] if _bridge_used != r["source_bridge"] else None),
+                        meta={"attempts": attempts, "draft_id": _q_meta.get("draft_id"),
+                              "purpose": r.get("purpose")},
+                    )
+                except Exception as _persist_exc:  # noqa: BLE001
+                    log.error(
+                        "[OUTBOUND_PERSIST] queue id=%s sent but canonical row not written: %s",
+                        rid, _persist_exc,
+                    )
 
                 # Owner-authoritative accounting boundary (2026-08-30): a
                 # successful WhatsApp delivery of an authorized owner→accountant
@@ -713,6 +767,19 @@ async def sweep_once(limit: int = 20) -> dict:
                     )
                     dlq += 1
                     await record_error("outbound.dlq", e)
+                    # 2026-11-06 — mirror the final failure onto any canonical
+                    # message row already linked to this queue item, so the
+                    # message table alone can answer "did it actually go?".
+                    try:
+                        from app.database import execute as _execute
+                        await _execute(
+                            """UPDATE wbom_whatsapp_messages
+                                  SET delivery_status = 'dlq'
+                                WHERE outbound_queue_id = $1""",
+                            rid,
+                        )
+                    except Exception:  # noqa: BLE001 — pre-091 schema / not linked
+                        pass
                     _meta_outbound_log("meta_outbound_dlq", source_bridge=r["source_bridge"], queue_id=rid, attempts=attempts, error_class=type(e).__name__)
                 else:
                     # Exponential backoff: 1m, 2m, 4m, ...

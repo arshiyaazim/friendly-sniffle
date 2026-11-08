@@ -16,8 +16,8 @@ providers.
 | Inbound | WhatsApp bridges (bridge1/2/3) + Meta webhooks |
 | Outbound | `modules.outbound` queue → bridge → WhatsApp |
 | UI | 12 served single-page apps + 2 design previews (no build step), Bengali + English |
-| Modules | 81 domain packages under `modules/` |
-| Migrations | 89 ordered SQL files under `db/migrations/` |
+| Modules | 82 domain packages under `modules/` |
+| Migrations | 90 ordered SQL files under `db/migrations/` |
 
 ---
 
@@ -28,6 +28,9 @@ providers.
 - [Pages and URLs](#pages-and-urls) — every screen, its tabs, tables, buttons, forms and modals
 - [API surface](#api-surface)
 - [Inbound message pipeline](#inbound-message-pipeline) — identity → intent → routing → safety gates
+- [Outbound messages, bridges and AI provenance](#outbound-messages-bridges-and-ai-provenance) — what each stored row can prove
+- [Connecting a WhatsApp bridge (WhatsApp MCP) and the first import](#connecting-a-whatsapp-bridge-whatsapp-mcp-and-the-first-import)
+- [AI providers: local and hosted](#ai-providers-local-and-hosted)
 - [Identity brain and identity-based domains](#identity-brain-and-identity-based-domains)
 - [Payroll and accounts](#payroll-and-accounts)
 - [Escort duty roster and dispatch](#escort-duty-roster-and-dispatch)
@@ -169,7 +172,7 @@ Redis, and the mock bridges. See `tests/conftest.py` and
 ```
 friendly-sniffle/
 ├── app/
-│   ├── main.py                  FastAPI app: 143 routes, lifespan, mounts every router
+│   ├── main.py                  FastAPI app: 145 routes, lifespan, mounts every router
 │   ├── config.py                Settings (163 fields) — the single source of configuration
 │   ├── database.py              asyncpg pool: fetch_all / fetch_val / fetch_one / execute
 │   ├── llm.py, ollama.py        reply generation + provider fallback chain
@@ -177,11 +180,11 @@ friendly-sniffle/
 │   ├── unified_routing.py       workload → provider routing
 │   ├── bridge.py, outbound client, logging_setup.py, error_log.py
 │   └── static/                  12 served SPAs (+2 previews), no bundler, no node_modules
-├── modules/                     81 domain packages — one package per feature area
+├── modules/                     82 domain packages — one package per feature area
 ├── shared/                      cross-cutting helpers: auth, drafts, phone, events, queue arbiter
 ├── db/
 │   ├── migrate.py               migration runner (see Local setup)
-│   └── migrations/              89 ordered .sql files — the only schema authority
+│   └── migrations/              90 ordered .sql files — the only schema authority
 ├── migrations/                  older standalone SQL, NOT run by db/migrate.py
 ├── scripts/                     restart_gate_readiness.py, secret_scan.sh
 ├── tools/                       one-off repair CLIs (e.g. repair_fpe_transactions.py)
@@ -200,7 +203,7 @@ friendly-sniffle/
 | HR | `admin_employees`, `admin_transactions`, `attendance`, `attendance_parser`, `employee_conversation`, `employee_verification` |
 | Escort & dispatch | `escort`, `escort_lifecycle`, `escort_roster`, `escort_slip_extractor`, `dispatch` |
 | Recruitment | `recruitment_flow`, `recruitment_ai`, `recruitment_assistant`, `recruitment_detector`, `recruitment_turn_decision`, `recruitment_recovery_sweep` |
-| Ops & platform | `scheduler`, `backup`, `health_monitor`, `operations_health`, `observability`, `reports`, `preflight_guard`, `rbac`, `outbound`, `bridge_poller`, `kb_upload`, `knowledge_base`, `ai_console`, `ai_readonly_tools`, `business_read_service`, `admin_chat_lab`, `admin_commands`, `admin_directives`, `hermes_kernel`, `hermes_tasks`, `social_auto_reply`, `media_normalization`, `ocr_processor`, `voice_processor`, `image_hash`, `location_adapter`, `wa_chat_frontend` |
+| Ops & platform | `scheduler`, `backup`, `health_monitor`, `operations_health`, `observability`, `reports`, `preflight_guard`, `rbac`, `outbound`, `bridge_poller`, `history_backfill`, `ai_provenance.py`, `kb_upload`, `knowledge_base`, `ai_console`, `ai_readonly_tools`, `business_read_service`, `admin_chat_lab`, `admin_commands`, `admin_directives`, `hermes_kernel`, `hermes_tasks`, `social_auto_reply`, `media_normalization`, `ocr_processor`, `voice_processor`, `image_hash`, `location_adapter`, `wa_chat_frontend` |
 
 ## Ports and services
 
@@ -360,7 +363,7 @@ create+link a missing row, or accept/reject suggested pairs
 
 ## API surface
 
-FastAPI mounts 143 routes in `app/main.py` plus the domain routers. Grouped by
+FastAPI mounts 145 routes in `app/main.py` plus the domain routers. Grouped by
 prefix:
 
 | Prefix | Purpose |
@@ -378,6 +381,7 @@ prefix:
 | `/api/assistant/ops/*` | Operational reads: `ai-routes`, `business-read`, `system-secrets` |
 | `/api/rag/*`, `/api/memory/*`, `/api/runtime/*`, `/api/identity/*` | Retrieval, memory, runtime truth, identity |
 | `/api/queue/*`, `/api/outbound/*`, `/api/bridges/*`, `/api/whatsapp/*` | Outbound queue, bridge status, WhatsApp helpers |
+| `/api/bridge/history-backfill`, `/api/bridge/history-backfill/status` | One-time bridge-store import (POST starts/resumes, GET reports progress) |
 | `/webhook/meta/*`, `/webhook/mcp1`, `/webhook/mcp2` | Inbound webhooks (signature-checked) |
 | `/reports`, `/reports/{name}` | Reporting layer — `?fmt=` json / csv / text, `?no_cache=true` |
 | `/health`, `/health/deep`, `/health/c1b` | Liveness/readiness probes |
@@ -470,6 +474,339 @@ detection, prompt-injection screening, `DRAFT_ALWAYS` (names/phones/roles that
 always draft), the financial-draft gate, `AI_SAFE_MODE`, outbound queue
 authorisation, and the per-bridge sending state. The system is non-sending
 (`AUTO_REPLY_ENABLED=False`) until bridge, authorisation and routing tests pass.
+
+---
+
+## Outbound messages, bridges and AI provenance
+
+`wbom_whatsapp_messages` is the canonical history for **both** directions. Since
+2026-11-06 (migration
+[`091_outbound_provenance_and_history_backfill.sql`](db/migrations/091_outbound_provenance_and_history_backfill.sql))
+an outbound row can answer three questions it previously could not:
+
+1. **Which bridge actually carried it?** — `source_bridge` is written at the
+   transport boundary (`modules.outbound.sweep_once()` →
+   `modules.bridge_poller.persist_outbound_message()`), i.e. *after*
+   `BridgeClient.send_strict()` returned 200. A queue failover (`fallback_channel`)
+   therefore records the bridge that accepted the message, not the one first
+   requested; the requested bridge stays in `metadata_json.failover_from`.
+2. **Did it go?** — `delivery_status` (`sent` / `dlq` / `unknown`) plus
+   `external_id` and `outbound_queue_id`.
+3. **Was it AI-generated, and by which model?** — `ai_generated`,
+   `ai_provider`, `ai_model`, `ai_task`.
+
+### Column contract
+
+| Column | Meaning |
+|---|---|
+| `sender_number` | The sender as received. **Inbound:** the person. **Outbound:** the counterparty we wrote to (never our own bridge number). |
+| `canonical_phone`, `phone_last10` | Normalised identity keys (`8801XXXXXXXXX`, last 10 digits). Filled for every new row in both directions; empty for LID/PSID senders that are not phone numbers. |
+| `original_sender_number` | Untouched raw value, kept so normalisation can never lose the original. |
+| `receiver_number` | **Our** bridge number (`_source_to_receiver()`), never the counterparty. |
+| `source_bridge` | Bridge that carried the message (equals `platform` for new rows). |
+| `direction` | `inbound` / `outbound` (transport direction — *not* a business classification). |
+| `actor_type` / `actor_id` | Who produced the content: `external_user`, `automation`, `hermes`, `human_device`, … |
+| `outbound_queue_id` | `fazle_outbound_queue.id`; unique partial index ⇒ one message row per queue item, even across retries. |
+| `delivery_status` | Outbound transport outcome: `sent`, `dlq`, `unknown`, or NULL (row pre-dates a confirmed send). |
+| `ai_generated` | **Tri-state.** `true` = an LLM wrote the body, `false` = rule/template/human, `NULL` = unknown (every pre-migration row, and history-imported outbound rows). Query with `IS TRUE`. |
+| `ai_provider`, `ai_model`, `ai_task` | Which provider/model answered, and what for (`reply`, `recruitment_reply`, `chat_reply`). |
+| `history_imported` | `true` = written by the importer/live capture from a bridge store, never routed. |
+
+### Where the AI flag comes from
+
+`app.llm._record_attempt()` records every provider attempt; on `success` it also
+calls `modules.ai_provenance.record_success()`. The same hook exists at each
+write point for replies that bypass `app.llm` (`app.ollama`, `app.minimax_provider`,
+`app.unified_routing`'s `phase3_ai_routes`). The result is a per-task
+`ContextVar`, snapshotted into `fazle_outbound_queue.meta_json` at enqueue time
+(so it survives the async send in the dispatcher's own task) and copied onto the
+message row at send-success.
+
+Rules, deliberately conservative:
+
+* `actor_type='human_device'` is **never** labelled AI, whatever the context says.
+* A generation older than 15 minutes is ignored (no stale leakage onto an
+  unrelated message).
+* Intent classification, admin RAG answers and internal decision calls are
+  excluded — they must not mark a neighbouring rule-based reply as AI-written.
+* History-imported outbound rows stay `NULL`: their origin cannot be proven.
+
+### How outbound rows get written
+
+| Path | When | Result |
+|---|---|---|
+| `modules.outbound.sweep_once()` → `persist_outbound_message()` | Immediately after a bridge accepts a send | Upgrade of the queue-linked row, or a new row if the caller never pre-saved one |
+| `bridge_poller._save_message()` | At enqueue time by reply cascades (legacy) | Row carrying `outbound_queue_id`; upgraded by the path above |
+| `bridge_poller._poll_bridge_outbound()` | Every `BRIDGE_OUTBOUND_POLL_S` (default 10s) | Messages typed **on the phone itself** (`is_from_me = 1`), read from the bridge store |
+| `modules.history_backfill.import_message()` | One-time import (below) | Pre-existing history, `history_imported = true` |
+
+Migration 091 also backfilled legacy rows: `source_bridge` from `platform`,
+`canonical_phone`/`phone_last10` for outbound rows that never had them,
+`delivery_status='unknown'`, and `ai_generated = NULL` (not `false`) for
+everything that existed before it.
+
+### Useful queries
+
+```sql
+-- AI-written messages in the last 7 days, per bridge and model
+SELECT source_bridge, ai_provider, ai_model, count(*)
+  FROM wbom_whatsapp_messages
+ WHERE direction = 'outbound' AND ai_generated IS TRUE
+   AND received_at > NOW() - INTERVAL '7 days'
+ GROUP BY 1,2,3 ORDER BY 4 DESC;
+
+-- outbound volume per bridge (device-typed vs automated vs AI)
+SELECT source_bridge,
+       count(*) FILTER (WHERE actor_type = 'human_device') AS typed_on_phone,
+       count(*) FILTER (WHERE ai_generated IS TRUE)        AS ai_written,
+       count(*) FILTER (WHERE ai_generated IS FALSE)        AS rule_or_human,
+       count(*) FILTER (WHERE ai_generated IS NULL)         AS unknown
+  FROM wbom_whatsapp_messages
+ WHERE direction = 'outbound'
+ GROUP BY 1 ORDER BY 1;
+
+-- anything that never reached a bridge
+SELECT outbound_queue_id, source_bridge, delivery_status, message_body
+  FROM wbom_whatsapp_messages
+ WHERE direction = 'outbound' AND delivery_status = 'dlq'
+ ORDER BY received_at DESC LIMIT 20;
+```
+
+### Honest limits
+
+* `delivery_status='sent'` means **the bridge accepted the send** (`HTTP 200`),
+  not that the recipient's phone displayed or read it. `external_id` is
+  `"<bridge>:<recipient>"` — the bridge API returns no WhatsApp message id.
+* Device capture de-duplicates on (body + counterparty + bridge). Two
+  identical device-typed messages to the same person (e.g. "ok" twice) collapse
+  into the first one; the app never invents a second row.
+* Group messages remain outside the canonical history unless the JID is an
+  approved `wbom_group_identities` row.
+* Rows written before migration 091 keep `ai_generated = NULL` forever; there is
+  no way to reconstruct whether an old reply was model-written.
+
+---
+
+## Connecting a WhatsApp bridge (WhatsApp MCP) and the first import
+
+### Topology
+
+Each bridge is a **separate process** (the WhatsApp MCP / whatsmeow bridge) that
+owns one WhatsApp session — one phone number — plus its own SQLite store:
+
+```
+phone A ── whatsmeow ── bridge1 (HTTP :8082) ── store/bridge1/messages.db   ← read-only
+phone B ── whatsmeow ── bridge2 (HTTP :8081) ── store/bridge2/messages.db   ← read-only
+phone C ── whatsmeow ── bridge3 (HTTP :8083) ── store/bridge3/messages.db   ← read-only
+                                   whatsapp.db (session, LID map, contacts)
+```
+
+* **Ingest:** this app opens `messages.db` with `file:…?mode=ro` and never writes
+  to it. Live inbound arrives by polling (adaptive 1–30 s).
+* **Egress:** sending is the only HTTP direction — `POST {BRIDGE_URL}/api/send`
+  with `{"recipient", "message"}`, wrapped by a send-gate (`/api/send-control`)
+  and a circuit breaker. Media is fetched with `/api/download`.
+* The bridge's own store is preserved even when this app cannot parse a row
+  (`bridge_store_preserved` in `metadata_json`).
+
+### Configuration
+
+| Variable | Purpose |
+|---|---|
+| `BRIDGE1_URL`, `BRIDGE2_URL`, `BRIDGE3_URL` | Bridge HTTP endpoints (defaults `:8082`, `:8081`, `:8083`) |
+| `BRIDGE1_NUMBER`, `BRIDGE2_NUMBER`, `BRIDGE3_NUMBER` | The WhatsApp number each bridge is paired with |
+| `BRIDGE1_LABEL`, `BRIDGE2_LABEL`, `BRIDGE3_LABEL` | Human labels (`HR`, `OPS`, `REC2`) |
+| `BRIDGE1_DB_PATH` … `BRIDGE3_DB_PATH` | `store/bridgeN/messages.db` |
+| `BRIDGE1_WHATSAPP_DB_PATH` … `BRIDGE3_WHATSAPP_DB_PATH` | `store/bridgeN/whatsapp.db` |
+| `BRIDGE_MEDIA_ACQUISITION_ENABLED`, `BRIDGE_MEDIA_DOWNLOAD_TIMEOUT_S` | Fetch `[media:*]` placeholders through `/api/download` |
+| `BRIDGE_OUTBOUND_CAPTURE_ENABLED`, `BRIDGE_OUTBOUND_POLL_S` | Capture messages typed on the phone itself (default on, 10 s) |
+
+### Pairing a new phone
+
+1. Start the bridge process with its store directory; it prints a QR code (or
+   writes it to `whatsapp.db`'s companion output).
+2. On the phone: **WhatsApp → Linked devices → Link a device**, scan the QR.
+3. Wait until the bridge reports the session as connected and
+   `messages.db` starts receiving rows.
+4. Point `BRIDGEn_DB_PATH` / `BRIDGEn_WHATSAPP_DB_PATH` at that store, set
+   `BRIDGEn_NUMBER`, restart the app.
+5. Verify: `POST /api/bridges/probe` and `GET /api/bridges/diagnostics`; the
+   poller logs `[bridgeN] Poller started` and a heartbeat row appears in
+   `fazle_service_heartbeats` (`bridge_poller:bridgeN`).
+6. Send one test message **to** the bridge number and confirm it appears in
+   `wbom_whatsapp_messages` (`direction='inbound'`, `source_bridge='bridgeN'`).
+
+Nothing is sent before the send gate opens; a freshly paired bridge cannot
+auto-reply until identity, routing and the quality gates have run.
+
+### First connection: importing the store's existing history
+
+A fresh link carries the conversation history inside the bridge store
+(`from_history_sync = 1` rows and every `is_from_me = 1` row). Live routing
+ignores those rows **on purpose** — the 2026-09-02 Bridge3 incident showed that
+replaying ~2,444 old messages through routing can auto-answer history. The
+importer therefore writes history *without* routing:
+
+| What it does | What it never does |
+|---|---|
+| Persists every store row to `wbom_whatsapp_messages` with `history_imported = true`, `is_processed = true`, `source_context = 'history_backfill'` | Call `process_message()`, trigger a workflow, intent, admin command or AI reply |
+| Resolves identity (`identity_brain.detect_identity`) into `identity_role` / `identity_confidence` | Enqueue or send anything |
+| Upserts the counterparty into `fazle_unified_contacts` + `wbom_contacts` (`contact_sync.upsert_contact_from_message`) | Modify the bridge store (still `mode=ro`) |
+| Normalises `canonical_phone` / `phone_last10` / `original_sender_number` | Invent provenance: outbound history rows get `ai_generated = NULL` |
+
+Run it one of three ways:
+
+```bash
+# 1) CLI (oldest → newest, resumable)
+python -m modules.history_backfill --bridge all
+python -m modules.history_backfill --bridge bridge2 --since 2025-01-01
+python -m modules.history_backfill --bridge bridge1 --dry-run     # count only
+
+# 2) Admin API (runs in the background; poll the status endpoint)
+curl -X POST http://localhost:8200/api/bridge/history-backfill      -H "X-Internal-Key: $INTERNAL_API_KEY"      -H 'Content-Type: application/json'      -d '{"bridge": "all", "include_outbound": true}'
+curl -H "X-Internal-Key: $INTERNAL_API_KEY"      http://localhost:8200/api/bridge/history-backfill/status
+
+# 3) Automatically at startup
+#    BRIDGE_HISTORY_BACKFILL_ON_START=true
+#    BRIDGE_HISTORY_BACKFILL_SINCE=2025-01-01
+#    BRIDGE_HISTORY_BACKFILL_INCLUDE_OUTBOUND=true
+```
+
+Progress and counters live in `wbom_bridge_history_backfill` (one row per
+bridge: `pending → running → completed | failed`, plus `last_rowid`,
+`inbound_imported`, `outbound_imported`, `skipped_duplicate`,
+`contacts_upserted`, `identity_resolved`).
+
+* **Idempotent** — paging is by SQLite `rowid`; every insert is guarded by the
+  same `message_hash` uniqueness the live pipeline uses, and outbound rows are
+  additionally matched against already-stored messages (same body, counterparty
+  and bridge) so an app-sent reply is never duplicated.
+* **Resumable** — a run that is interrupted (or stopped with `max_messages`)
+  leaves the bridge in `pending`; the next run continues from `last_rowid`.
+* **Complete** — reads the whole store (both directions, 200 rows per page), not
+  just what arrived after pairing.
+* **Narrowed** — `--inbound-only`, `since`/`until`, and groups only when
+  `--include-groups` (and then only JIDs approved in `wbom_group_identities`).
+
+Excluded by design: reactions/receipts/revokes/deleted/protocol rows,
+newsletters, `status@broadcast`, unapproved groups, and media binaries (the row
+keeps its `[media:*]` placeholder and the store still holds the file).
+
+Sanity check after an import:
+
+```sql
+SELECT source_bridge,
+       count(*) FILTER (WHERE history_imported)                 AS imported,
+       count(*) FILTER (WHERE direction = 'inbound')            AS inbound,
+       count(*) FILTER (WHERE direction = 'outbound')           AS outbound,
+       count(DISTINCT canonical_phone)                          AS people
+  FROM wbom_whatsapp_messages
+ GROUP BY 1 ORDER BY 1;
+```
+
+To start over for one bridge: `--reset` (CLI) or `{"bridge": "bridge2", "reset": true}`
+(API). Resetting only clears the import state — it never deletes imported rows.
+
+---
+
+## AI providers: local and hosted
+
+Every reply-producing call goes through one chain, so switching provider is a
+configuration change, not a code change.
+
+### Provider order (`app/llm.py`)
+
+| Step | Provider | Enabled by | Notes |
+|---|---|---|---|
+| 1 | **OmniRoute / Hermes CLI** | `OMNIROUTE_API_KEY` (`OMNIROUTE_URL`, default `http://127.0.0.1:20128/v1`, `OMNIROUTE_MODEL=auto`) | Local gateway in front of Hermes |
+| 2 | **Groq** | `GROQ_API_KEY` + `GROQ_MODEL_NAME` (default `allam-2-7b`) | Hosted, fastest fallback |
+| 3 | **Local Ollama** | `OLLAMA_URL` (default `http://localhost:11434`) + `OLLAMA_MODEL`; disable with `OLLAMA_REPLY_DISABLED=true` | Default local path, Hermes-family model preferred |
+| 4 | **Kimi (Ollama cloud tag)** | `KIMI_MODEL_NAME` (default `kimi-k2.6:cloud`) | Last resort before the safe fallback text |
+| — | MiniMax | `MINIMAX_API_KEY`, `MINIMAX_MODEL` | Used by `hermes_dispatch`'s reply + semantic-gate paths |
+| — | GitHub Models | `GITHUB_TOKEN*` (+ `GITHUB_MODEL_NAME`) | Legacy; endpoint is confirmed dead and skipped |
+| — | 9Router | `NINE_ROUTER_*` | Only when `NINE_ROUTER_SINGLE_UPSTREAM_GUARANTEED=true` |
+
+If every provider fails, the caller receives the existing safe fallback text —
+never an exception and never an empty send.
+
+### Model tiers (local Ollama)
+
+`OLLAMA_MODEL` is the base model; the per-task overrides fall back to it when
+empty:
+
+| Setting | Used for |
+|---|---|
+| `OLLAMA_RUNTIME_MODEL` | routing/classification helpers |
+| `OLLAMA_BUSINESS_MODEL` | business/commercial answers |
+| `OLLAMA_MEMORY_MODEL` | memory summarisation |
+| `OLLAMA_GENERAL_MODEL` | general conversation |
+| `OLLAMA_DEEP_REASONING_MODEL` | multi-step reasoning |
+
+Tuning: `OLLAMA_NUM_CTX_*`, `OLLAMA_NUM_PREDICT_*`, `OLLAMA_TEMPERATURE_*`,
+`OLLAMA_INFER_CONCURRENCY`, `OLLAMA_CHAT_CONCURRENCY`.
+
+### Add a local model (Ollama), step by step
+
+```bash
+ollama pull hermes3:3b          # or any model you prefer
+ollama list                     # confirm the exact tag
+# .env
+OLLAMA_URL=http://localhost:11434
+OLLAMA_MODEL=hermes3:3b
+OLLAMA_GENERAL_MODEL=hermes3:3b
+```
+
+Restart the app; `app/ollama_daemon` warms the model at startup and
+`check_ollama_health()` reports availability. If the configured Hermes tag is not
+provisioned, the app silently falls back to `OLLAMA_MODEL` instead of failing.
+
+### Add a hosted provider
+
+```bash
+# Groq
+GROQ_API_KEY=...
+GROQ_MODEL_NAME=allam-2-7b
+```
+
+Any OpenAI-compatible endpoint can be registered as a **route** without touching
+code — this is the supported way to add OpenRouter, Gemini or a private
+OpenAI-compatible server:
+
+```bash
+curl -X POST http://localhost:8200/api/assistant/ops/ai-routes   -H "X-Internal-Key: $INTERNAL_API_KEY" -H 'Content-Type: application/json'   -d '{"route_id":"my-gemini","display_name":"Gemini 2.5","priority":50,
+       "transport":"direct_provider","provider":"gemini",
+       "model":"gemini-2.5-flash","base_url":"https://generativelanguage.googleapis.com/v1beta",
+       "credential_type":"api_key","credential_ref":"gemini_core_key"}'
+```
+
+Supported `transport` values: `omniroute_gateway`, `direct_provider`,
+`local_ollama`, `hermes_runner_adapter`; supported `provider` values:
+`omniroute`, `groq`, `openrouter`, `gemini`, `ollama-local`. The API key itself
+is stored separately in the system secret store
+(`POST /api/assistant/ops/system-secrets`) and referenced by `credential_ref`;
+listing, updating, deleting and `POST /api/assistant/ops/ai-routes/reorder` work
+the same way.
+
+### Adding a provider adapter in code
+
+1. Create `app/<provider>_provider.py` exposing `classify_intent_llm()`,
+   `generate_reply()`, `generate_recruitment_reply()` and `decision_call()`
+   (see `app/openai_compatible_provider.py` for the minimal shape).
+2. Register the provider in `app/unified_routing.py`'s dispatch table.
+3. Record provenance on success — call
+   `modules.ai_provenance.record_success(provider, model, task="reply")` at the
+   point the reply string is returned, otherwise the message will be stored with
+   `ai_generated = false`.
+
+### Verifying a provider
+
+* `GET /health` — aggregate health, including `llm`.
+* `app.llm.get_last_attempts()` — per-call trace of
+  `(provider, model, outcome, detail)` for the current task.
+* `wbom_whatsapp_messages.ai_provider` / `ai_model` — what actually answered in
+  production (see the outbound section above).
+* `phase3_ai_routes` — the authoritative order when an admin-configured route
+  matches the workload; unmatched workloads fall back to the chain above.
 
 ---
 
@@ -616,6 +953,23 @@ environment variables or a deployment secrets manager for credentials, provider
 API keys, bridge addresses, and contact identifiers. The app should remain in a
 non-sending mode until bridge configuration, authorization, and message-routing
 tests have passed.
+
+Schema changes are applied only through `db/migrate.py`; the newest file is
+[`091_outbound_provenance_and_history_backfill.sql`](db/migrations/091_outbound_provenance_and_history_backfill.sql),
+which adds the outbound provenance columns and the history-import state table
+described above. The writer is schema-tolerant: a database that has not run 091
+still accepts every message (the unknown columns are dropped), it just cannot
+record provenance yet.
+
+Operational switches introduced with that migration:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `BRIDGE_HISTORY_BACKFILL_ON_START` | `false` | Import each bridge store once, at startup |
+| `BRIDGE_HISTORY_BACKFILL_SINCE` | *(whole store)* | ISO lower bound for that import |
+| `BRIDGE_HISTORY_BACKFILL_INCLUDE_OUTBOUND` | `true` | Also import `is_from_me = 1` history |
+| `BRIDGE_OUTBOUND_CAPTURE_ENABLED` | `true` | Persist messages typed on the phone itself |
+| `BRIDGE_OUTBOUND_POLL_S` | `10` | How often that capture loop reads the store |
 
 For the staged clean-install, migration, bridge, AI-provider, verification, and
 rollback checklist, see [`MASTER_PRODUCTION_PLAN.md`](MASTER_PRODUCTION_PLAN.md).

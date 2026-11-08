@@ -771,6 +771,19 @@ class TestScopeIsolation:
             "tests/db/test_outbound_authorization_revalidation.py",
             "tests/unit/test_payment_relay.py",
             "tests/unit/test_bridge_poller_payment_relay_gate.py",
+            # 2026-11-06 — outbound persistence + AI provenance + first-connect
+            # history import. The allowlist is cumulative: each dated batch of
+            # work adds its own files, and the two negative guards below
+            # (semantic gate, recruitment/employee routing, feature-flag
+            # surfaces) still apply to every batch.
+            ".env.example",
+            "README.md",
+            "app/main.py",
+            "app/minimax_provider.py",
+            "app/ollama.py",
+            "modules/bridge_poller/__init__.py",
+            "modules/recruitment_recovery_sweep/__init__.py",
+            "tests/unit/test_wbom_actor_attribution_stage_b.py",
         }
         changed = self._changed_tracked_files()
         assert changed.issubset(expected_allowed), f"unexpected files changed: {changed - expected_allowed}"

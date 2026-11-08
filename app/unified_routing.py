@@ -502,6 +502,21 @@ async def _invoke_core_route(route, request, settings, *, use_secret_store=False
         from app import ollama
         if result in {getattr(ollama, "FALLBACK_REPLY_TEXT", object()), getattr(ollama, "RECRUITMENT_FALLBACK_TEXT", object())}:
             return ProviderResult.failure(FailureClass.MALFORMED_PROVIDER_RESPONSE)
+    # 2026-11-06 — outbound provenance for admin-configured phase3_ai_routes:
+    # this is the single success point of every route-backed generation, so a
+    # reply produced here is labelled with the route's own provider/model
+    # instead of looking like non-AI text in wbom_whatsapp_messages.
+    _PROVENANCE_TASKS = {
+        "conversational_reply": "reply",
+        "recruitment_reply": "recruitment_reply",
+    }
+    _task = _PROVENANCE_TASKS.get(request.workload)
+    if _task:
+        try:
+            from modules import ai_provenance
+            ai_provenance.record_success(route.provider, route.model, task=_task)
+        except Exception:  # noqa: BLE001 — provenance must never break a reply
+            pass
     return ProviderResult.success(str(result))
 
 
