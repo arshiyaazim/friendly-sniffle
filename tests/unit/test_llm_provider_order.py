@@ -819,6 +819,20 @@ class TestScopeIsolation:
             ".gitignore",
             "tests/unit/test_phase_a_corpus.py",
             "tests/unit/test_admin_ai_router.py",
+            # 2026-11-06 — access-control + operations batch: owner-key scope,
+            # write identity guard, metrics token, nginx reference, and the three
+            # operator checks (isolation / restore drill / bridge smoke).
+            "app/config.py",
+            "tests/conftest.py",
+            "Makefile",
+            "deploy/nginx.conf.example",
+            "scripts/verify_isolation.py",
+            "scripts/restore_drill.py",
+            "scripts/bridge_smoke.py",
+            "tests/unit/test_access_control_hardening.py",
+            "tests/unit/test_apply_schema_plan.py",
+            # hardcoded /home/azim/core path → repo-relative (2 tests recovered)
+            "tests/unit/test_phase8b_open_chat_ui.py",
         }
         changed = self._changed_tracked_files()
         assert changed.issubset(expected_allowed), f"unexpected files changed: {changed - expected_allowed}"

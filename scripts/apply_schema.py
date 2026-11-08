@@ -70,6 +70,13 @@ KNOWN_MISSING_OBJECTS = (
     "fazle_knowledge_base.status",
     "fazle_payment_drafts.employee_phone",
     "role fazle_ai_reader",
+    # Added 2026-11-06 by an actual virgin build (PostgreSQL 16.2): payroll
+    # migration 008 fails on wbom_employees, 009 on wbom_escort_programs, and
+    # identity_brain 004 on fazle_contact_roles. No file in this repository
+    # creates any of the three — they are production-only objects like the rest.
+    "wbom_employees",
+    "wbom_escort_programs",
+    "fazle_contact_roles",
 )
 
 # Files that are a deliberate no-op on a virgin database.
@@ -171,6 +178,14 @@ async def _ensure_bookkeeping(conn) -> set[str]:
     return {r["name"] for r in rows}
 
 
+async def _record_only(conn, key: str) -> None:
+    """Record a file as applied without executing it (documented no-ops)."""
+    await conn.execute(
+        "INSERT INTO schema_migrations(name) VALUES($1) ON CONFLICT (name) DO NOTHING",
+        key,
+    )
+
+
 async def _apply_file(conn, key: str, path: str) -> None:
     sql = Path(path).read_text(encoding="utf-8")
     async with conn.transaction():
@@ -231,6 +246,15 @@ async def run() -> int:
                 except Exception as exc:  # noqa: BLE001
                     sqlstate = getattr(exc, "sqlstate", None) or ""
                     message = str(exc)
+                    if Path(path).name in VIRGIN_NOOP_FILES:
+                        # Deliberate guard for a data-repair migration: on a
+                        # database that never held production data its
+                        # precondition cannot hold. Record it and move on.
+                        await _record_only(conn, key)
+                        progressed = True
+                        failures.pop(key, None)
+                        print(f"  noop    {key}  ({message.splitlines()[0][:80]})")
+                        continue
                     gap = _gap_for(message)
                     if gap:
                         gaps_hit.add(gap)

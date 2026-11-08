@@ -1286,7 +1286,8 @@ the password replaced by `***`.
 | Bind address | `run.py` binds `127.0.0.1:APP_PORT` (default 8200). The container binds `0.0.0.0:8200`; publish it as `-p 127.0.0.1:8200:8200` to keep parity |
 | Public surface | 397 routes: **147** enforce a role, **195** require any valid key, **55** need no credential |
 | The 55 | 36 static page shells (HTML only), `/health` (app + payroll), `/metrics`, `/api/public-config`, `/api/state-version`, `/api/frontend/heartbeat`, `/login`, `/webhook/meta` (GET verify, POST signature-checked by default), `/webhook/mcp1|2`, and five endpoints that verify a service bearer inside the handler (`/datasets`, `/query`, `/admin-full-read`, `/ai-policy/*`) |
-| `/metrics` | Unauthenticated by design (Prometheus scraping of a loopback port). **Do not proxy `/metrics` publicly** — block it in nginx |
+| `/metrics` | Loopback-only by design. Set `METRICS_TOKEN` and the endpoint requires `Authorization: Bearer <token>` (or `X-Metrics-Token`); unset, it stays open so a scrape on 127.0.0.1 keeps working. **Do not proxy `/metrics` publicly** |
+| Reverse proxy | `deploy/nginx.conf.example` is the reference site: metrics/observability/`debug` denied, `/webhook/mcp*` restricted to private networks, `limit_req` on login and the API, `client_max_body_size 12m`. nginx is where the throttling and body limits live, because the app has none |
 | Bridge webhooks | HMAC is optional (`WEBHOOK_SIGNATURE_ENFORCEMENT=false` by default) → unsigned POSTs are accepted and logged. Keep `/webhook/*` off the public proxy, or set `BRIDGE_WEBHOOK_SECRET` + enable enforcement; the app warns about this at startup |
 | Firewall / nginx | Only 80/443 public. `location /` → `127.0.0.1:8200`; `deny all` for `/metrics`, `/webhook/mcp*` and `/api/public-config` if they are not needed externally |
 
@@ -1299,6 +1300,7 @@ the password replaced by `***`.
 | Cross-database FKs | None: every `REFERENCES` targets a table in the same database (verified by parsing all migrations) |
 | Roles | The app needs one login role that owns its database (no `SUPERUSER`, no `CREATEDB`). The first migration needs `pg_trgm`, which may require a superuser — `install.sh --preflight` checks this up front |
 | AI read path | Uses the deliberate `fazle_ai_reader` (`NOLOGIN`) role with `SELECT` grants on views only — lazy, least-privilege access to financial data |
+| Isolation proof | `scripts/verify_isolation.py` (also `make db-isolation`, and run automatically by `install.sh` step 3b-ii): refuses a cluster-default database, a `SUPERUSER`/`CREATEROLE`/`CREATEDB` role, tables in `public` owned by another role, and a redirected `search_path`. Verified against a real PostgreSQL 16.2: a plain role on its own database passes, `postgres` fails with all four elevated attributes named |
 
 ### Migration
 
@@ -1310,6 +1312,7 @@ the password replaced by `***`.
 | Rollback | **No down-migrations exist.** The rollback is a restore, which is why `install.sh` takes a `pg_dump` (gzipped, `600`) into `backups/pre-migrate-<ts>.sql.gz` before touching the schema. `SKIP_PRE_MIGRATION_BACKUP=1` opts out |
 | Re-run safety | Second run applies nothing — every file is already recorded in `schema_migrations` |
 | Dependency rounds | Files are retried up to 12 rounds when they fail on a not-yet-created object (`42P01`/`42703`/`42704`-class), because `db/migrations` is not topologically sorted |
+| Virgin-build evidence | Run for real against PostgreSQL 16.2 on 2026-11-06, twice: a virgin database applies **56** of 108 files, records `086_k32_recruitment_reconciliation.sql` as a documented no-op, and exits **3** naming the production-only objects it cannot create. That run **corrected the gap list** — `wbom_employees`, `wbom_escort_programs` and `fazle_contact_roles` are referenced by payroll/identity migrations and created by no file (10 known gaps, not 7) |
 
 ### API
 
@@ -1317,7 +1320,8 @@ the password replaced by `***`.
 |---|---|
 | Authentication | `X-Internal-Key` (server key, or an `fk_…` token from `/api/admin/login`); `Authorization: Bearer` for the service-to-service endpoints |
 | Authorization | 147 routes are role-gated (`_require_superadmin`, `_require_admin_or_above`, `_require_operator_or_above`, `_require_accountant_or_above`, `_require_office_assistant_or_above`, `_require_viewer_or_above`, `_permission(...)`, `require_command`) |
-| Rate limiting | `POST /api/admin/login`: 8 failures / 15 min per username+IP → `429` with `Retry-After`. **No other route is throttled** — that is a proxy concern: add `limit_req` in nginx for `/api/admin/login` is already done in-app; for the rest use nginx if needed |
+| Rate limiting | `POST /api/admin/login`: 8 failures / 15 min per username+IP → `429` with `Retry-After`. **No other route is throttled** in-app — `deploy/nginx.conf.example` adds `limit_req` zones for the rest |
+| Write identity | `RBAC_WRITE_GUARD` (on) resolves a presented `fk_` token's role level once, cached 60 s, and compares it with `RBAC_WRITE_MIN_LEVEL`. Default **0 = audit only**: a roleless token still writes, but each such write logs `[auth][audit] token with no role wrote …`, naming exactly who would break. Set `RBAC_WRITE_MIN_LEVEL=10` (or 20/70) to refuse them with 403. Requests without a token are untouched — the route's own dependency decides. Enforcing by default was rejected deliberately: the project's own suite proves `/api/fpe/operator/submit`, `/admin/users/{phone}/enable` and `/scheduler/run/{job}` currently write with roleless tokens |
 | Body/page limits | None in-app (uvicorn reads the whole body); cap `client_max_body_size` in nginx |
 
 ### RBAC — what each role can actually do
@@ -1332,8 +1336,13 @@ the password replaced by `***`.
 | `superadmin` | 100 | destructive/billing/client-profile deletes (`_require_superadmin`), user management |
 
 `INTERNAL_API_KEY` bypasses all of the above as owner — it is a server secret, not
-a person's login. The 195 key-only routes accept **any** valid key regardless of
-role; if that matters for an account, do not hand that account a token for them.
+a person's login — and since this audit it is **accepted from loopback only**
+(`owner_key_scope` middleware; a reverse proxy on the same host still works
+because it connects from 127.0.0.1). `INTERNAL_KEY_ALLOW_REMOTE=1` restores the
+old behaviour for a genuinely trusted remote host, and the app logs a warning
+while it is on. The 195 key-only routes still accept any *role-carrying* token:
+the write guard rejects tokens whose account is disabled or has no role, but a
+`viewer` token can still write where the route only asks for a key.
 `/api/admin/login` returns the actor's permissions so the UI hides what the API
 would refuse.
 
@@ -1374,27 +1383,54 @@ would refuse.
 | Process crash | systemd restarts after 5 s; `Restart=on-failure` plus the crash-loop window above |
 | Failed deploy | `scripts/restart_gate_readiness.py` fails the install when the unit restarts, crash-loops, logs a traceback, or `/health` returns 503 for a core probe |
 | Database loss | `gunzip -c backups/pre-migrate-<ts>.sql.gz | psql "$DATABASE_URL"` (the newest pre-migration dump is the rollback point; daily dumps are separate) |
+| Restore **drill** | `make restore-drill` (or `scripts/restore_drill.py`): picks the newest dump, checks gzip integrity and that the file ends with pg_dump's completion line, restores into a scratch `<db>_drill_<utc>` database, verifies `schema_migrations`/table/row counts, then drops it. Tolerates exactly the production-only objects and fails on anything else. `--dry-run` prints the commands with the password masked. **Executed for real on 2026-11-06**: 57 migrations and 83 tables restored into a scratch database, verdict PASS — the first attempt failed and exposed a URL-building bug (`str.replace("/postgres", …)` also rewrote the scheme), which is why the drill exists |
 | Schema half-applied | Re-run `scripts/apply_schema.py`: it resumes from the first unrecorded file |
 | Duplicate jobs after a bad restart | Check `fazle_scheduled_jobs` heartbeats; ensure only one instance has `SCHEDULER_ENABLED=true` |
 
+### Operator checks (all read-only unless stated)
+
+| Command | What it proves |
+|---|---|
+| `make db-isolation` (`scripts/verify_isolation.py`) | the target database is dedicated and the role is not a superuser; also run by `install.sh` step 3b-ii (`STRICT_DB_ISOLATION=1` to make it fatal) |
+| `make restore-drill` (`scripts/restore_drill.py`) | a backup actually restores: gzip + pg_dump completion check, scratch database, row/table counts, then drop |
+| `make bridge-smoke` (`scripts/bridge_smoke.py`) | the real bridge stores open read-only, stay byte-identical while read, and inbound is fresh within `--stale-minutes` |
+| `deploy/nginx.conf.example` | the reverse-proxy half the app does not implement: metrics denied, `/webhook/mcp*` restricted, `limit_req`, body cap |
+
+Each script has `--selftest` (no database, no bridge) and is exercised by
+`tests/unit/test_access_control_hardening.py`.
+
 ### Test suite reality
 
-`tests/unit` is not a "run anywhere" suite — most of it needs the database:
+The audit measured this instead of repeating "82 tests pass":
 
-| Set | Count | Needs PostgreSQL on `127.0.0.1:5433`? |
+| What was run | Result | Database needed? |
 |---|---|---|
-| `test_llm_provider_order.py` (40), `test_operational_hardening.py` (16), `test_apply_schema_plan.py` (8), `test_admin_bootstrap_credentials.py` (27) | **91 passed** | no |
-| The rest of `tests/unit` | ~710 setup errors without a database | yes — they assert on real rows |
-| `test_9router_recruitment_qualification.py` (3), `test_admin_ai_router.py::TestTriggerAdminInvestigation` (6) | fail | no — they read an external SQLite path (`/home/azim/9router/...`) and call the investigation trigger under a signature the router no longer has |
+| `test_llm_provider_order`, `test_operational_hardening`, `test_access_control_hardening`, `test_apply_schema_plan`, `test_admin_bootstrap_credentials`, `test_phase8b_open_chat_ui` | **134 passed** | `test_admin_bootstrap_credentials` yes, the rest no |
+| The whole `tests/unit` against a real PostgreSQL 16.2 (schema built by `tests/conftest.py`: 106 migration files) | reached ~84% before the sandbox reclaimed the process: **175 failed, 20 errors** | yes |
+| The same DB-backed files on the *untouched* base commit (`086fea5`) | **identical failures** (`test_payment_relay`: 14/14) | yes |
 
-Two portability defects were found and fixed here: `test_phase_a_corpus.py`
-hardcoded `/home/azim/core/...`, so the **whole** `tests/unit` collection aborted
-on any other machine (now repo-relative + `RECRUITMENT_CORPUS_DIR`, skipping the
-module when the corpus is absent); and `_FakeSettings` in
-`test_admin_ai_router.py` silently rotted every time `app/config.py` grew a field
-the router started reading (now falls back to the real `Settings` default).
-`tests/unit/test_phase_a_corpus.py`, `tests/unit/test_admin_ai_router.py` and
-`scripts/apply_schema.py` are the three files this audit had to touch for that.
+So a green number never meant "the business logic is proven": the DB-backed
+majority needs a database, and a real chunk of it fails on `master` independently
+of this work (payment relay, recruitment recovery sweep, Hermes capability
+boundary, RAG authority). Those are pre-existing and are **not** hidden by this
+document — they are simply out of scope for a deployment audit, and they say the
+app's own suite cannot be used as a release gate until they are triaged.
+
+What did change is that a missing database no longer produces 700 cryptic
+"Schema setup failed" errors: `tests/conftest.py` installs a no-database guard
+that turns every PostgreSQL touch into a recognisable skip (`204 database test(s)
+skipped`, everything else still runs), and `REQUIRE_TEST_DB=1` — set by
+`make test-local` and by CI — turns a missing database into a hard failure so a
+skipped suite can never look green.
+
+Running the real thing on a workstation:
+
+```bash
+export TEST_DB_PASSWORD=$(openssl rand -hex 12)
+make test-docker-up          # postgres-test on 127.0.0.1:5433 + mocks
+make test-local              # REQUIRE_TEST_DB=1 pytest tests/unit tests/integration tests/db tests/workflows
+make test-docker-down
+```
 
 ### Known flaky test (documented, then fixed)
 

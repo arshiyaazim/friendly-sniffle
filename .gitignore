@@ -141,6 +141,12 @@ RECRUITMENT_BOT_COORDINATION.md
 # silently swallowed by /scripts/* once already, and the merged tree shipped an
 # installer that died on a missing file.
 !/scripts/apply_schema.py
+# Operational checks referenced by install.sh / the Makefile / the README.
+# Anything an operator is told to run belongs in git — see the /scripts/*
+# incident in README "Operational readiness audit".
+!/scripts/verify_isolation.py
+!/scripts/restore_drill.py
+!/scripts/bridge_smoke.py
 
 # Backup files
 backups/
