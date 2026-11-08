@@ -13,16 +13,19 @@
 #   3. preflight: DATABASE_URL present, database reachable, pg_trgm available,
 #      APP_PORT not already taken by another service (e.g. an existing app or a
 #      WhatsApp bridge — this app is a SHARED neighbour, it does not replace them)
-#   4. schema: scripts/apply_schema.py applies payroll → escort → db/migrations,
-#      tracking every file in schema_migrations. Exit code 3 means the database
-#      still needs objects that only exist in the original production database;
-#      the installer then refuses to continue unless ALLOW_INCOMPLETE_SCHEMA=1
+#   4. schema: a pre-migration pg_dump goes to backups/ first (SKIP_PRE_MIGRATION_BACKUP=1
+#      opts out), then scripts/apply_schema.py applies payroll → escort →
+#      db/migrations, tracking every file in schema_migrations. Exit code 3 means
+#      the database still needs objects that only exist in the original production
+#      database; the installer then refuses to continue unless
+#      ALLOW_INCOMPLETE_SCHEMA=1
 #   5. unit: fazle-core.service rendered for this checkout, installed, enabled
 #   6. verification: the restart gate must pass before the script reports success
 #
 # Overridable: APP_DIR (defaults to this script's directory), RUN_USER
 # (defaults to $SUDO_USER, else the current user), PYTHON_BIN, UNIT_NAME,
-# APP_PORT, DATABASE_URL, SKIP_DB_CHECKS=1, ALLOW_INCOMPLETE_SCHEMA=1.
+# APP_PORT, DATABASE_URL, SKIP_DB_CHECKS=1, ALLOW_INCOMPLETE_SCHEMA=1,
+# SKIP_PRE_MIGRATION_BACKUP=1, BACKUP_DIR, NO_CPU_TORCH=1.
 #
 # For anything beyond a single-host install, follow MASTER_PRODUCTION_PLAN.md.
 
@@ -62,6 +65,19 @@ if [ "$PREFLIGHT_ONLY" -eq 0 ]; then
     ok "venv created ($VENV_DIR)"
   fi
   "$VENV_DIR/bin/pip" install -q --upgrade pip
+  # torch arrives through sentence-transformers (hybrid RAG, HYBRID_SEARCH_ENABLED
+  # is off by default). The plain PyPI wheel drags ~5.2 GB of CUDA libraries
+  # (torch 1.2 GB + triton 1.0 GB + nvidia-* 3.0 GB) onto a CPU-only VPS.
+  # Installing the CPU wheel first keeps pip from reaching for the CUDA build:
+  # ~200 MB instead of ~5.2 GB. Best effort — a failed download just falls back.
+  if [ "${NO_CPU_TORCH:-0}" != "1" ] && ! "$VENV_DIR/bin/python" -c "import torch" 2>/dev/null; then
+    if "$VENV_DIR/bin/pip" install -q --timeout 60 --retries 1 \
+         --index-url https://download.pytorch.org/whl/cpu torch 2>/dev/null; then
+      ok "CPU-only torch pre-installed (keeps ~5 GB of CUDA wheels off the host)"
+    else
+      warn "CPU torch wheel unavailable — using the default PyPI wheel (larger)"
+    fi
+  fi
   "$VENV_DIR/bin/pip" install -q -r "$APP_DIR/requirements.txt"
   ok "packages installed"
 else
@@ -241,6 +257,38 @@ if [ "$PREFLIGHT_ONLY" -eq 1 ]; then
   exit 0
 fi
 
+# ── 3c. Pre-migration backup ────────────────────────────────────────────────
+# There are no down-migrations: the only rollback is restoring a dump. So take
+# one before touching the schema — unless the operator explicitly opts out.
+BACKUP_DIR="${BACKUP_DIR:-$APP_DIR/backups}"
+case "$BACKUP_DIR" in
+  /*) : ;;
+  *)  BACKUP_DIR="$APP_DIR/${BACKUP_DIR#./}" ;;   # .env says ./backups
+esac
+if [ "${SKIP_PRE_MIGRATION_BACKUP:-0}" = "1" ]; then
+  warn "SKIP_PRE_MIGRATION_BACKUP=1 — no pre-migration backup taken"
+elif command -v pg_dump >/dev/null 2>&1; then
+  mkdir -p "$BACKUP_DIR"
+  chmod 700 "$BACKUP_DIR" 2>/dev/null || true
+  STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+  DUMP="$BACKUP_DIR/pre-migrate-$STAMP.sql.gz"
+  say "→ pre-migration backup ($DUMP) …"
+  if pg_dump --no-owner --no-privileges "$DATABASE_URL" 2>/dev/null | gzip > "$DUMP"; then
+    chmod 600 "$DUMP" 2>/dev/null || true
+    ok "backup written: $(du -h "$DUMP" 2>/dev/null | cut -f1) $DUMP"
+    # Print the restore hint with the password masked: this line lands in the
+    # operator's scrollback and in journalctl.
+    DB_URL_DISPLAY="$(printf '%s' "$DATABASE_URL" | sed -E 's#(://[^:/@]+):[^@]*@#\1:***@#')"
+    say "  restore with: gunzip -c $DUMP | psql \"$DB_URL_DISPLAY\""
+  else
+    rm -f "$DUMP"
+    die "pg_dump failed — refusing to migrate without a backup (SKIP_PRE_MIGRATION_BACKUP=1 overrides)"
+  fi
+else
+  warn "pg_dump not found — no pre-migration backup. Install the postgresql-client"
+  warn "package, or take one yourself: pg_dump \"<your DATABASE_URL>\" | gzip > backup.sql.gz"
+fi
+
 # ── 4. Schema ───────────────────────────────────────────────────────────────
 # Three ordered sets, not one: the payroll-engine tables and the two standalone
 # escort schemas are prerequisites for db/migrations (030 indexes fpe_employees,
@@ -251,6 +299,11 @@ fi
 # never re-applied behind an operator's back.
 say ""
 say "=== Schema (payroll → escort → db/migrations, tracked in schema_migrations) ==="
+if [ ! -f "$APP_DIR/scripts/apply_schema.py" ]; then
+  # This exact failure shipped once: .gitignore swallowed the file, so the
+  # installer referenced a script that was not in the tree.
+  die "scripts/apply_schema.py is missing — the checkout is incomplete (git pull --ff-only and re-run)"
+fi
 SCHEMA_RC=0
 DATABASE_URL="$DATABASE_URL" "$VENV_DIR/bin/python" "$APP_DIR/scripts/apply_schema.py" || SCHEMA_RC=$?
 if [ "$SCHEMA_RC" -eq 3 ]; then

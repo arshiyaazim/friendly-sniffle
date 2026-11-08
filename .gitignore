@@ -136,6 +136,11 @@ RECRUITMENT_BOT_COORDINATION.md
 # The restart gate is neither: it is covered by unit tests and run by
 # install.sh, so it must ship with the code.
 !/scripts/restart_gate_readiness.py
+# The schema builder is a build artefact of the installer, not an ad-hoc
+# operational script: install.sh calls it, so it MUST be tracked. It was
+# silently swallowed by /scripts/* once already, and the merged tree shipped an
+# installer that died on a missing file.
+!/scripts/apply_schema.py
 
 # Backup files
 backups/

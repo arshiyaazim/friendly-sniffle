@@ -531,15 +531,24 @@ class TestCheckHealthConcurrencyAndTimeout:
         monkeypatch.setattr(llm, "_check_omniroute", lambda: _delayed("ok"))
         monkeypatch.setattr(llm, "_check_github_models", lambda: _delayed("ok"))
         monkeypatch.setattr(llm, "_check_ollama", lambda: _delayed("ok"))
+        # ALL FOUR probes must be stubbed. This test used to leave `_check_groq`
+        # real, and `_reset_settings()` sets GROQ_API_KEY to a fake value, so the
+        # probe made a genuine HTTPS call to api.groq.com. Where egress is blocked
+        # (sandbox/CI) the client construction + failed connect blocks the event
+        # loop for ~1.3s, the three 0.3s sleeps serialize, and the assertion fails
+        # even though check_health() is correctly concurrent — a timing assertion
+        # was measuring the network, not the code. Stubbing the fourth probe keeps
+        # the assertion strict and makes it deterministic.
+        monkeypatch.setattr(llm, "_check_groq", lambda *_a, **_kw: _delayed("disabled"))
 
         t0 = _time.monotonic()
         await llm.check_health()
         elapsed = _time.monotonic() - t0
 
-        # Sequential would be >= 3 * PER_CHECK_DELAY; concurrent should be
+        # Sequential would be >= 4 * PER_CHECK_DELAY; concurrent should be
         # close to 1 * PER_CHECK_DELAY plus overhead.
         assert elapsed < PER_CHECK_DELAY * 2, (
-            f"check_health() took {elapsed:.2f}s for 3 checks each delayed "
+            f"check_health() took {elapsed:.2f}s for 4 checks each delayed "
             f"{PER_CHECK_DELAY}s -- looks sequential, not concurrent"
         )
 
@@ -799,6 +808,17 @@ class TestScopeIsolation:
             "tests/unit/test_apply_schema_plan.py",
             "app/logging_setup.py",
             "db/migrations/093_seed_rbac_roles.sql",
+            "fazle-core.service",
+            "tests/unit/test_operational_hardening.py",
+            # 2026-11-06 — operational readiness audit: the schema builder the
+            # merged tree was missing, plus two portability fixes that the
+            # audit found (a hardcoded /home/azim corpus path that broke
+            # collection, and a test stub that had rotted behind Settings).
+            # `.gitignore` had to change too: /scripts/* was swallowing the
+            # builder, which is why the merged tree lacked it.
+            ".gitignore",
+            "tests/unit/test_phase_a_corpus.py",
+            "tests/unit/test_admin_ai_router.py",
         }
         changed = self._changed_tracked_files()
         assert changed.issubset(expected_allowed), f"unexpected files changed: {changed - expected_allowed}"

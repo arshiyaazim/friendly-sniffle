@@ -37,6 +37,7 @@ providers.
 - [Escort duty roster and dispatch](#escort-duty-roster-and-dispatch)
 - [Recruitment funnel](#recruitment-funnel)
 - [Scheduled jobs](#scheduled-jobs) · [Reports](#reports)
+- [Operational readiness audit](#operational-readiness-audit-2026-11-06) — git, systemd, permissions, network, database, migration, API, RBAC, jobs, WhatsApp, resources, recovery, test suite
 - [Configuration and deployment](#configuration-and-deployment)
 
 ---
@@ -202,7 +203,9 @@ problem instead of leaving a half-configured host:
 3. preflight — `DATABASE_URL` present and reachable, `pg_trgm` available, and
    `APP_PORT` still free (so it cannot steal a port from an app that is already
    running);
-4. schema — `db/migrate.py` applies every pending file under `db/migrations`;
+4. schema — a `pg_dump` rollback point goes to `backups/` first, then
+   `scripts/apply_schema.py` applies the pending files (see
+   [Operational readiness audit](#operational-readiness-audit-2026-11-06));
 5. unit — `fazle-core.service` is rendered for wherever the checkout actually
    lives (`@APP_DIR@` / `@RUN_USER@` are substituted, never shipped raw),
    installed and started;
@@ -1233,6 +1236,183 @@ error). `system_observation` never contains a write statement — it reports, it
 does not fix.
 
 ---
+
+## Operational readiness audit (2026-11-06)
+
+Everything below was checked against the code in this repository and, where a
+database was needed, against a real PostgreSQL 16.2 instance. Where something is
+**not** covered, it says so instead of implying coverage.
+
+### Git
+
+| Check | Result |
+|---|---|
+| Branch | `arena/bff986c3-friendly-sniffle`, working tree clean before this audit |
+| Scope | earlier credentials/installer work is merged (`41fea6f`); this audit adds only the files listed in its commit |
+| Secrets in git | `.gitignore` covers `.env`, `.env.*`, `logs/`, `*.log`, `backups/`, `venv/`; `scripts/secret_scan.sh` exists for a pre-push sweep |
+| Ignored-but-required files | `/scripts/*` is a blanket ignore. It silently swallowed `scripts/apply_schema.py`, so the merged tree shipped an `install.sh` that referenced a file that did not exist — the install died at step 4. Fixed with an explicit `!/scripts/apply_schema.py` **and** a `die` guard in the installer. Any new script the installer calls needs its own `!` line; `git check-ignore -v <path>` is the check |
+
+### systemd (`fazle-core.service`)
+
+| Check | Result |
+|---|---|
+| Service user | `User=`/`Group=@RUN_USER@` rendered by `install.sh`; never root, no `ProtectSystem` because the unit legitimately writes inside its own directory |
+| Restart policy | `Restart=on-failure`, `RestartSec=5`, `TimeoutStopSec=30`, `KillMode=mixed` |
+| Crash-loop | `StartLimitIntervalSec=120` + `StartLimitBurst=10` (systemd's 5/10s default trips during a slow database start and leaves the unit failed) |
+| Environment | `EnvironmentFile=-@APP_DIR@/.env` (leading `-` = a missing `.env` is a warning, not a failed start); `PYTHONUNBUFFERED=1`, `PYTHONPATH=@APP_DIR@` |
+| Logs | stdout/stderr appended to `logs/fazle-core.{stdout,error}.log`; the app's own rotating log is `logs/fazle-core.log` (10 MB × 5) |
+| Hardening | `NoNewPrivileges=true`, `PrivateTmp=true`, `UMask=0077` |
+
+Verify a rendered unit before installing it:
+`sed -e "s|@APP_DIR@|/srv/fazle|g" -e "s|@RUN_USER@|fazle|g" fazle-core.service > /tmp/u.service && systemd-analyze verify /tmp/u.service`.
+
+### File permissions
+
+| File | Mode | Set by |
+|---|---|---|
+| `.env` (holds `INTERNAL_API_KEY`, `DATABASE_URL`, bootstrap password) | `600` | `install.sh` creates it `600` and tightens an existing one |
+| `logs/fazle-core.log` | `600` | `app/logging_setup.py` (it can contain the one-time bootstrap password) |
+| `backups/`, `backups/**` | `700` / `600` | `modules/backup`, and the pre-migration dump in `install.sh` |
+| Everything else the service creates | `0600`/`0700` | unit `UMask=0077` |
+
+Database credentials live only in `.env`; they are never logged (audited: no
+`log.*DATABASE_URL` call sites). The pre-migration restore hint is printed with
+the password replaced by `***`.
+
+### Network
+
+| Check | Result |
+|---|---|
+| Bind address | `run.py` binds `127.0.0.1:APP_PORT` (default 8200). The container binds `0.0.0.0:8200`; publish it as `-p 127.0.0.1:8200:8200` to keep parity |
+| Public surface | 397 routes: **147** enforce a role, **195** require any valid key, **55** need no credential |
+| The 55 | 36 static page shells (HTML only), `/health` (app + payroll), `/metrics`, `/api/public-config`, `/api/state-version`, `/api/frontend/heartbeat`, `/login`, `/webhook/meta` (GET verify, POST signature-checked by default), `/webhook/mcp1|2`, and five endpoints that verify a service bearer inside the handler (`/datasets`, `/query`, `/admin-full-read`, `/ai-policy/*`) |
+| `/metrics` | Unauthenticated by design (Prometheus scraping of a loopback port). **Do not proxy `/metrics` publicly** — block it in nginx |
+| Bridge webhooks | HMAC is optional (`WEBHOOK_SIGNATURE_ENFORCEMENT=false` by default) → unsigned POSTs are accepted and logged. Keep `/webhook/*` off the public proxy, or set `BRIDGE_WEBHOOK_SECRET` + enable enforcement; the app warns about this at startup |
+| Firewall / nginx | Only 80/443 public. `location /` → `127.0.0.1:8200`; `deny all` for `/metrics`, `/webhook/mcp*` and `/api/public-config` if they are not needed externally |
+
+### Database
+
+| Check | Result |
+|---|---|
+| Separation | One database per deployment (`fazle_core`); nothing writes outside it |
+| Schema | `public` only — no `CREATE SCHEMA`, no custom `search_path` anywhere in migrations or code |
+| Cross-database FKs | None: every `REFERENCES` targets a table in the same database (verified by parsing all migrations) |
+| Roles | The app needs one login role that owns its database (no `SUPERUSER`, no `CREATEDB`). The first migration needs `pg_trgm`, which may require a superuser — `install.sh --preflight` checks this up front |
+| AI read path | Uses the deliberate `fazle_ai_reader` (`NOLOGIN`) role with `SELECT` grants on views only — lazy, least-privilege access to financial data |
+
+### Migration
+
+| Check | Result |
+|---|---|
+| Coverage | `scripts/apply_schema.py` applies all 108 files (payroll 14 → escort 2 → `db/migrations` 92); every one parses against the PostgreSQL 16 grammar (`pglast`/`libpg_query`, 108/108) |
+| Atomicity | Every file runs in its own transaction, recorded in `schema_migrations` only after success |
+| Partial failure | `exit 1` names the exact file + SQL error; re-running resumes from there. Exit `3` means "incomplete, missing objects that only exist in production" |
+| Rollback | **No down-migrations exist.** The rollback is a restore, which is why `install.sh` takes a `pg_dump` (gzipped, `600`) into `backups/pre-migrate-<ts>.sql.gz` before touching the schema. `SKIP_PRE_MIGRATION_BACKUP=1` opts out |
+| Re-run safety | Second run applies nothing — every file is already recorded in `schema_migrations` |
+| Dependency rounds | Files are retried up to 12 rounds when they fail on a not-yet-created object (`42P01`/`42703`/`42704`-class), because `db/migrations` is not topologically sorted |
+
+### API
+
+| Check | Result |
+|---|---|
+| Authentication | `X-Internal-Key` (server key, or an `fk_…` token from `/api/admin/login`); `Authorization: Bearer` for the service-to-service endpoints |
+| Authorization | 147 routes are role-gated (`_require_superadmin`, `_require_admin_or_above`, `_require_operator_or_above`, `_require_accountant_or_above`, `_require_office_assistant_or_above`, `_require_viewer_or_above`, `_permission(...)`, `require_command`) |
+| Rate limiting | `POST /api/admin/login`: 8 failures / 15 min per username+IP → `429` with `Retry-After`. **No other route is throttled** — that is a proxy concern: add `limit_req` in nginx for `/api/admin/login` is already done in-app; for the rest use nginx if needed |
+| Body/page limits | None in-app (uvicorn reads the whole body); cap `client_max_body_size` in nginx |
+
+### RBAC — what each role can actually do
+
+| Role | Level | Enforced by |
+|---|---|---|
+| `viewer` | 10 | `_require_viewer_or_above`, read-only report/status routes |
+| `office_assistant` | 20 | attendance draft entry only (`_require_office_assistant_or_above`); no approve/edit |
+| `operator` | 30 | dispatch/roster and draft decisions (`_require_operator_or_above`) |
+| `accountant` | 50 | payroll/cash/income and payment review (`_require_accountant_or_above`) |
+| `admin` | 70 | employee + configuration writes (`_require_admin_or_above`, `_require_admin_role`) |
+| `superadmin` | 100 | destructive/billing/client-profile deletes (`_require_superadmin`), user management |
+
+`INTERNAL_API_KEY` bypasses all of the above as owner — it is a server secret, not
+a person's login. The 195 key-only routes accept **any** valid key regardless of
+role; if that matters for an account, do not hand that account a token for them.
+`/api/admin/login` returns the actor's permissions so the UI hides what the API
+would refuse.
+
+### Background jobs and duplicate workers
+
+| Worker | Two instances safe? | Why |
+|---|---|---|
+| Scheduler (APScheduler) | **No** | In-memory job store, no distributed lock: two instances both fire every job (payroll compute, backups, digests). Keep `SCHEDULER_ENABLED=true` on exactly one instance |
+| Outbound queue worker | Yes | Claims rows with `FOR UPDATE SKIP LOCKED` |
+| Social send queue | Yes | Same claim pattern |
+| Escort queue | Yes | `pg_try_advisory_lock` per item |
+| Bridge poller | Yes | Shared cursor + `processed_bridge_messages` dedup |
+| History import | Single-shot | State row per bridge (`schema_migrations` 091) |
+
+### WhatsApp access
+
+| Check | Result |
+|---|---|
+| Store access | Read-only: `sqlite3.connect("file:…?mode=ro")` everywhere — this app never writes the bridge store |
+| Pairing | No pairing UI and no pairing call; pairing stays the bridge's job |
+| Outbound | `OUTBOUND_ENABLED=false` by default; `bridge.ensure_enabled()` refuses sends, and `_pairing_held()` additionally blocks a bridge that reports a non-sending state |
+| Ownership | The bridge is a shared neighbour: `BRIDGE*_URL` points at the running bridge, nothing is restarted or re-paired |
+
+### Resource usage (measured on this checkout)
+
+| Item | Value |
+|---|---|
+| Repository | 13 MB (2.8 MB `.git`) |
+| Python | 3.11; import of `app.main` takes ~2.3 s and peaks at **82 MiB RSS** |
+| Dependencies | `pip install -r requirements.txt` with the default PyPI `torch` wheel: **≈6.1 GB** (`nvidia-*` 3.0 GB + `torch` 1.2 GB + `triton` 1.0 GB). `install.sh` pre-installs the CPU wheel (`download.pytorch.org/whl/cpu`, `NO_CPU_TORCH=1` opts out), which drops the venv to a few hundred MB |
+| Disk growth | Logs: 10 MB × 5 rotations. Backups: one `pg_dump` per day per `BACKUP_KEEP_DAILY` |
+| Docker image | **Not measured** — no Docker daemon in this environment. The `Dockerfile` is `python:3.11-slim` + tesseract/ffmpeg/libpq/gcc; expect roughly the venv size plus ~300 MB of OS packages, so build with the CPU torch step above |
+
+### Recovery
+
+| Scenario | Behaviour |
+|---|---|
+| Process crash | systemd restarts after 5 s; `Restart=on-failure` plus the crash-loop window above |
+| Failed deploy | `scripts/restart_gate_readiness.py` fails the install when the unit restarts, crash-loops, logs a traceback, or `/health` returns 503 for a core probe |
+| Database loss | `gunzip -c backups/pre-migrate-<ts>.sql.gz | psql "$DATABASE_URL"` (the newest pre-migration dump is the rollback point; daily dumps are separate) |
+| Schema half-applied | Re-run `scripts/apply_schema.py`: it resumes from the first unrecorded file |
+| Duplicate jobs after a bad restart | Check `fazle_scheduled_jobs` heartbeats; ensure only one instance has `SCHEDULER_ENABLED=true` |
+
+### Test suite reality
+
+`tests/unit` is not a "run anywhere" suite — most of it needs the database:
+
+| Set | Count | Needs PostgreSQL on `127.0.0.1:5433`? |
+|---|---|---|
+| `test_llm_provider_order.py` (40), `test_operational_hardening.py` (16), `test_apply_schema_plan.py` (8), `test_admin_bootstrap_credentials.py` (27) | **91 passed** | no |
+| The rest of `tests/unit` | ~710 setup errors without a database | yes — they assert on real rows |
+| `test_9router_recruitment_qualification.py` (3), `test_admin_ai_router.py::TestTriggerAdminInvestigation` (6) | fail | no — they read an external SQLite path (`/home/azim/9router/...`) and call the investigation trigger under a signature the router no longer has |
+
+Two portability defects were found and fixed here: `test_phase_a_corpus.py`
+hardcoded `/home/azim/core/...`, so the **whole** `tests/unit` collection aborted
+on any other machine (now repo-relative + `RECRUITMENT_CORPUS_DIR`, skipping the
+module when the corpus is absent); and `_FakeSettings` in
+`test_admin_ai_router.py` silently rotted every time `app/config.py` grew a field
+the router started reading (now falls back to the real `Settings` default).
+`tests/unit/test_phase_a_corpus.py`, `tests/unit/test_admin_ai_router.py` and
+`scripts/apply_schema.py` are the three files this audit had to touch for that.
+
+### Known flaky test (documented, then fixed)
+
+`tests/unit/test_llm_provider_order.py::TestCheckHealthConcurrencyAndTimeout::test_all_four_checks_actually_run_concurrently`
+failed with *"check_health() took 1.4–1.6s for 3 checks each delayed 0.3s"*.
+
+- **Cause** — the test stubbed only three of the four provider probes.
+  `_reset_settings()` sets `GROQ_API_KEY` to a fake value, so the fourth probe
+  (`_check_groq`) made a real HTTPS call to `api.groq.com`. Where egress is
+  blocked (CI/sandbox), building the client and failing the connect blocks the
+  event loop for ~1.3 s and the three `sleep(0.3)` probes serialize. The timing
+  assertion was measuring the network, not `check_health()`.
+- **Impact** — false red builds that hide real regressions; no runtime effect.
+  `check_health()` is correctly concurrent (measured: 0.303 s for three 0.3 s
+  probes in a clean interpreter).
+- **Fix** — the test now stubs `_check_groq` as well, keeps the strict
+  `< 2 × delay` assertion, and documents why ambient network must never be part
+  of a timing assertion.
 
 ## Configuration and deployment
 

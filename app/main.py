@@ -337,6 +337,18 @@ async def lifespan(app: FastAPI):
             "full owner access to every route. Replace it: openssl rand -hex 32",
             len(_ik),
         )
+
+    # Inbound webhooks are the only unauthenticated write surface. Meta's side
+    # enforces a signature by default; the bridge side does not, so an exposed
+    # /webhook/mcp1|2 would accept a forged inbound message from anyone who can
+    # reach the port. Either keep those paths off the public reverse proxy (the
+    # bridge is normally on the same host) or turn enforcement on.
+    if not settings.webhook_signature_enforcement:
+        log.warning(
+            "[security] bridge webhooks (/webhook/mcp1, /webhook/mcp2) accept UNSIGNED "
+            "requests (WEBHOOK_SIGNATURE_ENFORCEMENT=false). Do not expose those paths "
+            "publicly, or set BRIDGE_WEBHOOK_SECRET and WEBHOOK_SIGNATURE_ENFORCEMENT=true."
+        )
     # WhatsApp Chat UI — ensure runtime settings + groups tables exist
     try:
         await ensure_wa_chat_tables()
