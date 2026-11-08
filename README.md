@@ -2,9 +2,43 @@
 
 Fazle Core is a WhatsApp-oriented operations backend with employee, attendance,
 payroll, escort-program, recruitment, and AI-assisted conversation workflows.
-It is a Python application built with FastAPI, asyncpg, and PostgreSQL. Optional
-integrations include WhatsApp bridge services, Redis, Qdrant, and external or
-local AI providers.
+
+It is a Python application built with FastAPI, asyncpg, and PostgreSQL. Admin
+work is done from a set of single-file browser SPAs served by the same process;
+workflow decisions happen in the inbound message pipeline. Optional integrations
+include WhatsApp bridge services, Redis, Qdrant, and external or local AI
+providers.
+
+| | |
+|---|---|
+| Runtime | Python 3.11+, FastAPI + uvicorn |
+| Storage | PostgreSQL (all business state), Redis (cooldowns/queues, optional) |
+| Inbound | WhatsApp bridges (bridge1/2/3) + Meta webhooks |
+| Outbound | `modules.outbound` queue → bridge → WhatsApp |
+| UI | 12 served single-page apps + 2 design previews (no build step), Bengali + English |
+| Modules | 82 domain packages under `modules/` |
+| Migrations | 90 ordered SQL files under `db/migrations/` |
+
+---
+
+## Contents
+
+- [Requirements](#requirements) · [Local setup](#local-setup) · [Docker, the VPS installer and the restart gate](#docker-the-vps-installer-and-the-restart-gate) · [Tests](#tests)
+- [Folder structure](#folder-structure) · [Ports and services](#ports-and-services)
+- [Pages and URLs](#pages-and-urls) — every screen, its tabs, tables, buttons, forms and modals
+- [API surface](#api-surface)
+- [Inbound message pipeline](#inbound-message-pipeline) — identity → intent → routing → safety gates
+- [Outbound messages, bridges and AI provenance](#outbound-messages-bridges-and-ai-provenance) — what each stored row can prove
+- [Connecting a WhatsApp bridge (WhatsApp MCP) and the first import](#connecting-a-whatsapp-bridge-whatsapp-mcp-and-the-first-import)
+- [AI providers: local and hosted](#ai-providers-local-and-hosted)
+- [Identity brain and identity-based domains](#identity-brain-and-identity-based-domains)
+- [Payroll and accounts](#payroll-and-accounts)
+- [Escort duty roster and dispatch](#escort-duty-roster-and-dispatch)
+- [Recruitment funnel](#recruitment-funnel)
+- [Scheduled jobs](#scheduled-jobs) · [Reports](#reports)
+- [Configuration and deployment](#configuration-and-deployment)
+
+---
 
 ## Requirements
 
@@ -70,7 +104,7 @@ proxy. The container image binds `0.0.0.0:8200` (see `Dockerfile`).
 `.\.venv\Scripts\Activate.ps1` for the first two lines; every other command is
 identical.
 
-### Docker and the VPS installer
+## Docker, the VPS installer and the restart gate
 
 ```bash
 docker build -t fazle-core .
@@ -131,6 +165,787 @@ Integration, database, and end-to-end tests require real services — PostgreSQL
 Redis, and the mock bridges. See `tests/conftest.py` and
 `docker-compose.test.yml` before running them.
 
+---
+
+## Folder structure
+
+```
+friendly-sniffle/
+├── app/
+│   ├── main.py                  FastAPI app: 145 routes, lifespan, mounts every router
+│   ├── config.py                Settings (163 fields) — the single source of configuration
+│   ├── database.py              asyncpg pool: fetch_all / fetch_val / fetch_one / execute
+│   ├── llm.py, ollama.py        reply generation + provider fallback chain
+│   ├── *_provider.py            groq / minimax / nine-router / omniroute / openai-compatible
+│   ├── unified_routing.py       workload → provider routing
+│   ├── bridge.py, outbound client, logging_setup.py, error_log.py
+│   └── static/                  12 served SPAs (+2 previews), no bundler, no node_modules
+├── modules/                     82 domain packages — one package per feature area
+├── shared/                      cross-cutting helpers: auth, drafts, phone, events, queue arbiter
+├── db/
+│   ├── migrate.py               migration runner (see Local setup)
+│   └── migrations/              90 ordered .sql files — the only schema authority
+├── migrations/                  older standalone SQL, NOT run by db/migrate.py
+├── scripts/                     restart_gate_readiness.py, secret_scan.sh
+├── tools/                       one-off repair CLIs (e.g. repair_fpe_transactions.py)
+├── resources/                   CSV templates / seed material
+├── tests/                       unit · integration · db · workflows · resilience · e2e · load
+├── run.py · Dockerfile · fazle-core.service · install.sh · Makefile
+```
+
+`modules/` grouped by concern (package names are literal):
+
+| Group | Packages |
+|---|---|
+| Identity & contacts | `identity_brain`, `number_identity`, `phone_normalizer`, `contact_relations`, `contact_roles`, `contact_sync`, `owner_contact_registry`, `user_role` *(deprecated)* |
+| Conversation & AI | `message_router`, `intent`, `role_classifier`, `conversation_policy`, `conversation_memory`, `conversation_canonical`, `conversation_layer`, `reviewed_reply_memory`, `memory_extractor`, `reply_templates`, `route_b`, `route_b_handoff`, `message_archive`, `ollama_memory`, `rag` |
+| Payroll & money | `fazle_payroll_engine`, `payroll`, `payroll_logic`, `payment`, `payment_ingest`, `payment_workflow`, `payment_relay`, `payment_relay_accounting`, `payment_correction`, `drafts`, `draft_approval`, `draft_quality`, `accountant_summary`, `billing`, `client_billing` |
+| HR | `admin_employees`, `admin_transactions`, `attendance`, `attendance_parser`, `employee_conversation`, `employee_verification` |
+| Escort & dispatch | `escort`, `escort_lifecycle`, `escort_roster`, `escort_slip_extractor`, `dispatch` |
+| Recruitment | `recruitment_flow`, `recruitment_ai`, `recruitment_assistant`, `recruitment_detector`, `recruitment_turn_decision`, `recruitment_recovery_sweep` |
+| Ops & platform | `scheduler`, `backup`, `health_monitor`, `operations_health`, `observability`, `reports`, `preflight_guard`, `rbac`, `outbound`, `bridge_poller`, `history_backfill`, `ai_provenance.py`, `kb_upload`, `knowledge_base`, `ai_console`, `ai_readonly_tools`, `business_read_service`, `admin_chat_lab`, `admin_commands`, `admin_directives`, `hermes_kernel`, `hermes_tasks`, `social_auto_reply`, `media_normalization`, `ocr_processor`, `voice_processor`, `image_hash`, `location_adapter`, `wa_chat_frontend` |
+
+## Ports and services
+
+| Port | Service | Notes |
+|---|---|---|
+| **8200** | Fazle Core itself | `APP_PORT`; the URL prefix in every example below |
+| 8082 | bridge1 | `BRIDGE1_URL` default `http://localhost:8082` |
+| 8081 | bridge2 | `BRIDGE2_URL` default `http://localhost:8081` |
+| 8083 | bridge3 | `BRIDGE3_URL` default `http://localhost:8083` |
+| 11434 | Ollama | `OLLAMA_URL` default `http://localhost:11434` |
+| 6379 | Redis (optional) | `REDIS_URL` default `redis://localhost:6379/9` |
+| 5432 | PostgreSQL | app DB; tests default to **5433** (`TEST_DATABASE_URL`) |
+
+Every UI URL below is relative to `http://127.0.0.1:8200`.
+
+---
+
+## Pages and URLs
+
+All pages are static single-file SPAs served by `app/main.py` — no build step.
+Each one asks for the internal API key on first load (the key is stored in the
+browser) and calls the JSON API with it.
+
+| URL | Page file | What it is |
+|---|---|---|
+| `/`, `/dashboard` | `dashboard.html` | Admin console — 13 tabs |
+| `/dashboard/legacy` | server-rendered | Legacy summary page with live counts |
+| `/payroll`, `/payroll/<tab>` | `payroll.html` | HR & Admin (FPE) — 15 tabs |
+| `/escort-roster`, `/escort-roster.html` | `escort-roster.html` | Escort duty roster — 8 sections |
+| `/dispatch` | `dispatch.html` | Availability, assignment, release slips |
+| `/wa-chat`, `/dashboard/wa-chat` | `wa_chat.html` | WhatsApp-style operator inbox |
+| `/open-chat`, `/chat-lab` | `open-chat.html` | AI operating console |
+| `/drafts` | `drafts.html` | Reply-draft approval queue |
+| `/kb` | `kb.html` | Knowledge base |
+| `/admin/knowledge/recruitment` | `recruitment-knowledge.html` | Recruitment authority text |
+| `/unmatched-confirmations`, `.html` | `unmatched-confirmations.html` | Draft-confirmation review |
+| `/wbom-create-link`, `/wbom-link-review` | `wbom-*.html` | One-time FPE↔WBOM linking tools |
+| `/health`, `/health/deep`, `/health/c1b` | JSON | Probes (the restart gate reads `/health`) |
+| `/docs`, `/openapi.json` | FastAPI | Swagger UI and schema |
+
+### `/` — Admin dashboard (13 tabs)
+
+| Tab | Contents |
+|---|---|
+| **Overview** | Stat cards (`System Overview`), **Bridges** table, **Scheduler — Next Jobs**, **Backup** status |
+| **Drafts** | `Pending Reply Drafts` and `Pending Payment Drafts` lists with inline approve/cancel |
+| **Reports (B17)** | Report picker + `Args JSON` box + **Run** — renders the JSON/CSV/text of any report |
+| **Users (B19)** | `Admin Users` table (phone, name, role, status) + `Add User` form (Phone 8801…, Name, Role) |
+| **Identity–Role** | Search verified/display names; panels: **Selected identity**, **Metadata correction** (approved vs verified name + reason), **Identifier link** (type + JID/mobile/Meta ID), **Assign role** (role + business domain), **Place hold** |
+| **🤝 সম্পর্ক** (Relations) | Add/edit contact relations: phone, relation, trust, auto-reply on/off, notes; lists **শ্রেণিবিহীন কন্টাক্ট** and **সব সম্পর্ক**; search by number or relation |
+| **Audit** | `Audit Log (B19)` with command filter, limit and **Apply** |
+| **Backups (B18)** | Backup list, **Run Backup Now**, **Refresh List** |
+| **Scheduler** | `Scheduler Jobs (B16)` — every job, last status, last run, next run |
+| **RAG (B21)** | Index status, **Rebuild Index**, semantic `Search` with top-k |
+| **Observability (B22)** | `HTTP Summary` counters and `Error Log (recent)` |
+| **💬 Chat Lab** | Model picker, toggles for app context / DB read / internet, chat thread with **Send** / **Clear** |
+| **AI & Phone Settings** | AI provider settings; `WhatsApp Identity Numbers` — save accountant number, escort client numbers |
+
+Login gate: **Login** with the internal API key; **Logout** clears it.
+
+### `/payroll` — HR & Admin (15 tabs)
+
+Deep links exist for most tabs (`/payroll/overview`, `/payroll/transactions`,
+`/payroll/search`, `/payroll/employees`, `/payroll/addemployee`,
+`/payroll/unmatched`, `/payroll/review`, `/payroll/sync`, `/payroll/manual`,
+`/payroll/operator`, `/payroll/cash`, `/payroll/income`, `/payroll/admin`), plus
+`/payroll/transactions/{employee_id}` for an employee-scoped view. **Office
+Attendance** and **Employee Edit Requests** open from inside the SPA only.
+
+| Tab | Contents |
+|---|---|
+| **Overview** | `This Month's Summary` cards, `Recent Transactions`; quick ranges **Today / Last 3 days / Last 7 days / Last 30 days / All time**, date range `ovFrom`–`ovTo`, employee search, pager (First / Prev / Go / Next / Last) |
+| **Transactions** | Full transaction list with **Add Payment**, **Filter**/**Clear**, period presets, `txnFrom`–`txnTo`, method filter, jump-to-page, page size |
+| **Search** | Fuzzy `Employee Search` (type-ahead), date range, pager |
+| **Employees** | `Employees` table; **Add Employee**, status/sort filters, search by name/alias/phone, pager |
+| **Add New Employee** | Form: mobile `01XXXXXXXXX`, full name, staff designation, initial status; **Create Employee** / **Clear** |
+| **Unmatched** | `Unmatched Messages` queue, **Refresh**, "show reviewed" toggle |
+| **Review** | `Pending Accounting Candidates` — **Reject**, **Mark Duplicate**, **Requeue Parser**, status/confidence filters, pager |
+| **Sync** | `Sync & Processing Status` + `Module Health`; **Trigger Sync Now**, **Refresh** |
+| **Manual** | `Create Manual Transaction` and `Reverse Transaction` forms (employee lookup, amount, method, date, category, note; reversal by txn id) |
+| **Operator** | `Operator Submission` (same shape as manual, submitted for approval) + `Pending Submissions` |
+| **Cash** | `Cash Transactions` table (Date, Employee, Amount ৳, Sender, Method, Ref, Period) with search, date range, **Export CSV**, pager; plus `WhatsApp Shorthand Staging` list |
+| **Income** | `Income Transactions` table (Date, Employee, Amount ৳, Reported By, Period, Ref) and `New Income Entry` form (date, head, name, mobile, amount, ref) |
+| **Office Attendance** | `Attendance` CRUD (date range, source filter, employee picker, add/edit) + `Payroll Eligibility Preview` with **Run Preview**, **Run Dry Run**, **Run Reconciliation** |
+| **Employee Edit Requests** | Requests raised by employees, status filter, approve/reject |
+| **Admin** | `Admin Console` (users, roles), `Payroll Salary Baseline` (**Apply For All Employees**), `Activity Log`, `Client Settings`, `Generate Bill`, `Outstanding Balance` |
+
+### `/escort-roster` — Escort duty roster
+
+Header actions: **🔄 Sync**, **📜 History**, **⬇ Export CSV**, **➕ Add New Program**.
+
+| Section | Contents |
+|---|---|
+| **📋 Roster** | `rosterTable` — S/N, Mother Vessel, Lighter, 📞, Escort Name, Start Date, End Date, Days; pager (← Prev / Next →); **➕ Add Client** |
+| **🗂️ Kanban** | Board view of programs by status |
+| **📄 Slip Queue** | Pending release slips awaiting review |
+| **🧮 Shift Calc** | Shift/pay calculator — **Calculate**, **Save** |
+| **⚙️ Config** | `configTable` — destination, conveyance (BDT), shift rate (BDT), updated at |
+| **🕒 Attendance** | Attendance rows generated from programs |
+| **💰 Net Salary** | Per-program totals: Total, Food Bill, Net Payable |
+| **👤 Admin** | `adminUsersTable` (name, phone, username, status, role, last seen) + user modal (create/edit, search, status, role) |
+| Client list | Client phone + actions (add/edit/delete escort clients) |
+
+### `/dispatch` — Availability & controlled assignment
+
+Cards: **Check Availability** → **Availability Results** → **Ranked Suggestions**;
+**Assign / Reassign Escort** (with override reason + checkbox);
+**Existing Overlaps**; **Same-Vessel Review Queue**; **Safe Unassignment**;
+**Incomplete Drafts**; **Release-Slip Review** (candidate matching); **Manual
+Completion**. Everything except assign/unassign/complete is read-only.
+
+### `/wa-chat` — WhatsApp-style operator inbox
+
+Three-column layout with a conversation list, message thread and composer
+(😊 emoji, 📎 attach, 🎤 voice, ➤ send). Top bar: **💬 Contacts**, **👥 Groups**,
+**✏️ Drafts**, **⚙️ Settings ▾**, **⟳ Sync**, **Logout**.
+
+- Modals: `contactModal` (name, phone, role, relation, relation notes,
+  auto-reply, blocked, **🚫 Block Auto-Reply** / **✅ Unblock**, **🗑️ Delete
+  Contact**, **💾 Save**), `broadcastModal` (platform, recipients, text,
+  **📤 Send All**), `groupsModal`.
+- Bulk bar appears on selection with **Send to Selected** / **📤 Broadcast**.
+
+### `/open-chat` and `/chat-lab` — AI operating console
+
+Tabs: **Response · Evidence · Trace · Runtime · Memory**. Composer supports
+📎 file attach and 🎤 voice recording (with transcript review modal). Side
+actions: **Refresh Memory**, **Clear Chat**, history list, left-panel toggle.
+The Evidence/Trace tabs show which probes, tables and policy steps produced the
+answer — useful when a reply looks wrong.
+
+### `/drafts` — Reply-draft approval queue
+
+Table columns: **ID, প্রাপক (recipient), Draft Message, Role / Intent, Status,
+সময়, Action**. Filters: status select + free-text search; row count in
+`statsBar`. `editModal` edits body/meta/note; actions approve or **বাতিল**
+(cancel), **সংরক্ষণ করুন** (save).
+
+### `/kb` and `/admin/knowledge/recruitment`
+
+`/kb`: **Upload to KB** form; table **ID, Category, Key, Content Preview, Active,
+Action** (edit/toggle/delete). `/admin/knowledge/recruitment`: the recruitment
+authority text with **Save draft** / **Cancel**.
+
+### `/unmatched-confirmations` — Draft-confirmation review
+
+Review queue with detail pane and actions: link (with reason), reject (reason),
+defer (reason), new-acknowledgement; progress indicator and action status.
+
+### `/wbom-create-link` and `/wbom-link-review`
+
+One-time cleanup tools for linking payroll-engine employees to `wbom_employees`:
+create+link a missing row, or accept/reject suggested pairs
+(table: FPE #, Pair (FPE name / WBOM name), Phone, WBOM #, Action).
+
+---
+
+## API surface
+
+FastAPI mounts 145 routes in `app/main.py` plus the domain routers. Grouped by
+prefix:
+
+| Prefix | Purpose |
+|---|---|
+| `/api/fpe/*` (51 endpoints) | Payroll engine: `employees`, `transactions`, `cash`, `income`, `operator`, `unmatched`, `review`, `sync`, `normalization`, `staging-payments`, `ledger`, `stats`, `admin` |
+| `/api/admin/*`, `/admin/users/*` | Admin employees/transactions/users, login, knowledge upload |
+| `/admin/attendance/*`, `/admin/payroll/*` | Attendance CRUD, eligibility preview, dry run, reconciliation |
+| `/api/escort-roster/*` | Roster summary/active/export, config, escort clients, accountant phone, sync-all |
+| `/api/escort/*` | Escort program and slip review |
+| `/api/dispatch/*` | Availability, conflict check, suggestions, overlaps, assign/replace/unassign/complete, release slips |
+| `/api/payment-drafts/*`, `/api/drafts/*` | Draft approval queues |
+| `/api/tasks/*`, `/api/actions/*` | Hermes task state and action approvals |
+| `/api/social/*` | Social auto-reply backlog and sending |
+| `/admin/identity-role`, `/admin/contact-roles`, `/admin/contact-relations` | Identity metadata, roles, relations |
+| `/api/assistant/ops/*` | Operational reads: `ai-routes`, `business-read`, `system-secrets` |
+| `/api/rag/*`, `/api/memory/*`, `/api/runtime/*`, `/api/identity/*` | Retrieval, memory, runtime truth, identity |
+| `/api/queue/*`, `/api/outbound/*`, `/api/bridges/*`, `/api/whatsapp/*` | Outbound queue, bridge status, WhatsApp helpers |
+| `/api/bridge/history-backfill`, `/api/bridge/history-backfill/status` | One-time bridge-store import (POST starts/resumes, GET reports progress) |
+| `/webhook/meta/*`, `/webhook/mcp1`, `/webhook/mcp2` | Inbound webhooks (signature-checked) |
+| `/reports`, `/reports/{name}` | Reporting layer — `?fmt=` json / csv / text, `?no_cache=true` |
+| `/health`, `/health/deep`, `/health/c1b` | Liveness/readiness probes |
+
+---
+
+## Inbound message pipeline
+
+Every inbound WhatsApp message — regardless of bridge or webhook — flows through
+one path. Nothing replies before the identity step and no branch bypasses the
+safety gates.
+
+```
+bridge_poller / Meta webhook
+   → normalize phone, dedupe, cooldown, injection & flood checks
+   → identity_brain.detect_identity()        who is this?
+   → intent.detect_intent()                  what do they want?
+   → message_router.process_message()        role-based branch (below)
+   → reply generated (rules → KB → reviewed memory → AI)
+   → draft gate / outbound queue → bridge → WhatsApp
+```
+
+### Identity (who)
+
+`modules/identity_brain` resolves a sender against, in order:
+
+1. `seed_rule` — explicit row in `fazle_contact_roles` (highest trust)
+2. `db_employee` — `wbom_employees.employee_mobile` match
+3. `escort_roster` — active duty in `wbom_escort_programs`
+4. `env_phone` — `ESCORT_CLIENT_PHONES` explicit match
+5. `db_contact` — `wbom_contacts.relation` or an "escort" name token
+6. `text_hint` — keyword only, **never persisted** as identity
+7. `unknown`
+
+Roles, highest priority first: `admin` → `family`/`family_ceo` →
+`accountant` → `internal_coordinator`/`internal_operation` → `vip_client` →
+`security_service_client`/`client_escort_buyer`/`escort_client` → `employee`/
+`escort`/`security_guard` → `supervisor` → `employee_internal`/`repeat_client`
+→ `vendor` → `political_contact`/`government_contact` → `personal_business` →
+`candidate` → `unknown`.
+
+### Intent (what)
+
+`modules/intent` is rule-first with a Bengali/English keyword layer and a fuzzy
+match, falling back to the model only when the rules are inconclusive:
+`recruitment`, `salary_query`, `payment_due`, `escort_duty`, `attendance`,
+`complaint`, `client_order`, `leave`, `join`, `slip_submission`, `voice_note`,
+`greeting`, `unknown`.
+
+### Routing order
+
+`message_router.process_message()` evaluates branches in this fixed order
+(first match wins):
+
+| # | Branch | Typical sender |
+|---|---|---|
+| 1 | Family — personal, no business workflow | `family`, `family_ceo` |
+| 2 | Escort client — strict order gate; admin gets a draft, never an auto-reply | `client_escort_buyer`, `vip_client`, `repeat_client` |
+| 3 | Admin commands | `admin` |
+| 4 | Attendance — creates an approval draft | any role saying হাজির / Present |
+| 5 | Intent classification | everyone |
+| 6 | Accountant — cash shorthand, reconciliation replies | `accountant` |
+| 7/8 | Recruitment — one eligibility decision per candidate | `candidate`, `unknown` |
+| 9 | Escort order (non-registered senders) | `unknown` |
+| 10 | Employee workflow — duty, salary, leave, documents | `employee`, `escort`, `security_guard`, `supervisor` |
+| 11 | Advance / payment request | any unhandled role |
+| 11.5 | **Route B** — Ollama-only reply | `escort`, `security_guard`, `candidate`, `unknown` |
+| 12 | Office-location fast path (KB only, no AI) | everyone |
+| 13 | Knowledge base | everyone |
+| 14 | Reviewed reply memory | everyone |
+| 15 | AI fallback | everyone |
+
+### What each role gets
+
+| Sender | Behaviour |
+|---|---|
+| **Employee / escort / guard** | Duty, attendance, salary, advance and leave questions answered from the DB (`payroll_logic` never fabricates an amount — missing data returns `under_review`); payment and attendance outcomes go to the admin as drafts |
+| **Job applicant (candidate)** | Recruitment funnel: name → age → area → job preference → experience → phone confirmation, one question at a time; recovery sweep re-engages stalled sessions |
+| **Service-interested sender** (escort order) | Treated as a potential client: quantity/detail questions answered from KB; anything that commits money or people becomes an admin draft |
+| **Current client** | Strict order gate: no price/commitment without admin approval; reply drafts are queued for the owner rather than sent automatically |
+| **Admin** | Commands (`APPROVE`, `PAID`, `ATTENDANCE SAVE`, report runs, holds, corrections) execute with audit |
+| **Accountant** | Cash shorthand (`PAID <id> <amount> <method>`) parsed deterministically into `fpe_cash_transactions` |
+| **Family** | Personal conversation only; no business workflow triggered |
+| **Unknown** | Recruitment eligibility check, else Route B (Ollama) with read-only context, else KB, else AI fallback |
+
+### Safety gates
+
+Applied to every reply before sending: reply cooldown, keyword-flood and loop
+detection, prompt-injection screening, `DRAFT_ALWAYS` (names/phones/roles that
+always draft), the financial-draft gate, `AI_SAFE_MODE`, outbound queue
+authorisation, and the per-bridge sending state. The system is non-sending
+(`AUTO_REPLY_ENABLED=False`) until bridge, authorisation and routing tests pass.
+
+---
+
+## Outbound messages, bridges and AI provenance
+
+`wbom_whatsapp_messages` is the canonical history for **both** directions. Since
+2026-11-06 (migration
+[`091_outbound_provenance_and_history_backfill.sql`](db/migrations/091_outbound_provenance_and_history_backfill.sql))
+an outbound row can answer three questions it previously could not:
+
+1. **Which bridge actually carried it?** — `source_bridge` is written at the
+   transport boundary (`modules.outbound.sweep_once()` →
+   `modules.bridge_poller.persist_outbound_message()`), i.e. *after*
+   `BridgeClient.send_strict()` returned 200. A queue failover (`fallback_channel`)
+   therefore records the bridge that accepted the message, not the one first
+   requested; the requested bridge stays in `metadata_json.failover_from`.
+2. **Did it go?** — `delivery_status` (`sent` / `dlq` / `unknown`) plus
+   `external_id` and `outbound_queue_id`.
+3. **Was it AI-generated, and by which model?** — `ai_generated`,
+   `ai_provider`, `ai_model`, `ai_task`.
+
+### Column contract
+
+| Column | Meaning |
+|---|---|
+| `sender_number` | The sender as received. **Inbound:** the person. **Outbound:** the counterparty we wrote to (never our own bridge number). |
+| `canonical_phone`, `phone_last10` | Normalised identity keys (`8801XXXXXXXXX`, last 10 digits). Filled for every new row in both directions; empty for LID/PSID senders that are not phone numbers. |
+| `original_sender_number` | Untouched raw value, kept so normalisation can never lose the original. |
+| `receiver_number` | **Our** bridge number (`_source_to_receiver()`), never the counterparty. |
+| `source_bridge` | Bridge that carried the message (equals `platform` for new rows). |
+| `direction` | `inbound` / `outbound` (transport direction — *not* a business classification). |
+| `actor_type` / `actor_id` | Who produced the content: `external_user`, `automation`, `hermes`, `human_device`, … |
+| `outbound_queue_id` | `fazle_outbound_queue.id`; unique partial index ⇒ one message row per queue item, even across retries. |
+| `delivery_status` | Outbound transport outcome: `sent`, `dlq`, `unknown`, or NULL (row pre-dates a confirmed send). |
+| `ai_generated` | **Tri-state.** `true` = an LLM wrote the body, `false` = rule/template/human, `NULL` = unknown (every pre-migration row, and history-imported outbound rows). Query with `IS TRUE`. |
+| `ai_provider`, `ai_model`, `ai_task` | Which provider/model answered, and what for (`reply`, `recruitment_reply`, `chat_reply`). |
+| `history_imported` | `true` = written by the importer/live capture from a bridge store, never routed. |
+
+### Where the AI flag comes from
+
+`app.llm._record_attempt()` records every provider attempt; on `success` it also
+calls `modules.ai_provenance.record_success()`. The same hook exists at each
+write point for replies that bypass `app.llm` (`app.ollama`, `app.minimax_provider`,
+`app.unified_routing`'s `phase3_ai_routes`). The result is a per-task
+`ContextVar`, snapshotted into `fazle_outbound_queue.meta_json` at enqueue time
+(so it survives the async send in the dispatcher's own task) and copied onto the
+message row at send-success.
+
+Rules, deliberately conservative:
+
+* `actor_type='human_device'` is **never** labelled AI, whatever the context says.
+* A generation older than 15 minutes is ignored (no stale leakage onto an
+  unrelated message).
+* Intent classification, admin RAG answers and internal decision calls are
+  excluded — they must not mark a neighbouring rule-based reply as AI-written.
+* History-imported outbound rows stay `NULL`: their origin cannot be proven.
+
+### How outbound rows get written
+
+| Path | When | Result |
+|---|---|---|
+| `modules.outbound.sweep_once()` → `persist_outbound_message()` | Immediately after a bridge accepts a send | Upgrade of the queue-linked row, or a new row if the caller never pre-saved one |
+| `bridge_poller._save_message()` | At enqueue time by reply cascades (legacy) | Row carrying `outbound_queue_id`; upgraded by the path above |
+| `bridge_poller._poll_bridge_outbound()` | Every `BRIDGE_OUTBOUND_POLL_S` (default 10s) | Messages typed **on the phone itself** (`is_from_me = 1`), read from the bridge store |
+| `modules.history_backfill.import_message()` | One-time import (below) | Pre-existing history, `history_imported = true` |
+
+Migration 091 also backfilled legacy rows: `source_bridge` from `platform`,
+`canonical_phone`/`phone_last10` for outbound rows that never had them,
+`delivery_status='unknown'`, and `ai_generated = NULL` (not `false`) for
+everything that existed before it.
+
+### Useful queries
+
+```sql
+-- AI-written messages in the last 7 days, per bridge and model
+SELECT source_bridge, ai_provider, ai_model, count(*)
+  FROM wbom_whatsapp_messages
+ WHERE direction = 'outbound' AND ai_generated IS TRUE
+   AND received_at > NOW() - INTERVAL '7 days'
+ GROUP BY 1,2,3 ORDER BY 4 DESC;
+
+-- outbound volume per bridge (device-typed vs automated vs AI)
+SELECT source_bridge,
+       count(*) FILTER (WHERE actor_type = 'human_device') AS typed_on_phone,
+       count(*) FILTER (WHERE ai_generated IS TRUE)        AS ai_written,
+       count(*) FILTER (WHERE ai_generated IS FALSE)        AS rule_or_human,
+       count(*) FILTER (WHERE ai_generated IS NULL)         AS unknown
+  FROM wbom_whatsapp_messages
+ WHERE direction = 'outbound'
+ GROUP BY 1 ORDER BY 1;
+
+-- anything that never reached a bridge
+SELECT outbound_queue_id, source_bridge, delivery_status, message_body
+  FROM wbom_whatsapp_messages
+ WHERE direction = 'outbound' AND delivery_status = 'dlq'
+ ORDER BY received_at DESC LIMIT 20;
+```
+
+### Honest limits
+
+* `delivery_status='sent'` means **the bridge accepted the send** (`HTTP 200`),
+  not that the recipient's phone displayed or read it. `external_id` is
+  `"<bridge>:<recipient>"` — the bridge API returns no WhatsApp message id.
+* Device capture de-duplicates on (body + counterparty + bridge). Two
+  identical device-typed messages to the same person (e.g. "ok" twice) collapse
+  into the first one; the app never invents a second row.
+* Group messages remain outside the canonical history unless the JID is an
+  approved `wbom_group_identities` row.
+* Rows written before migration 091 keep `ai_generated = NULL` forever; there is
+  no way to reconstruct whether an old reply was model-written.
+
+---
+
+## Connecting a WhatsApp bridge (WhatsApp MCP) and the first import
+
+### Topology
+
+Each bridge is a **separate process** (the WhatsApp MCP / whatsmeow bridge) that
+owns one WhatsApp session — one phone number — plus its own SQLite store:
+
+```
+phone A ── whatsmeow ── bridge1 (HTTP :8082) ── store/bridge1/messages.db   ← read-only
+phone B ── whatsmeow ── bridge2 (HTTP :8081) ── store/bridge2/messages.db   ← read-only
+phone C ── whatsmeow ── bridge3 (HTTP :8083) ── store/bridge3/messages.db   ← read-only
+                                   whatsapp.db (session, LID map, contacts)
+```
+
+* **Ingest:** this app opens `messages.db` with `file:…?mode=ro` and never writes
+  to it. Live inbound arrives by polling (adaptive 1–30 s).
+* **Egress:** sending is the only HTTP direction — `POST {BRIDGE_URL}/api/send`
+  with `{"recipient", "message"}`, wrapped by a send-gate (`/api/send-control`)
+  and a circuit breaker. Media is fetched with `/api/download`.
+* The bridge's own store is preserved even when this app cannot parse a row
+  (`bridge_store_preserved` in `metadata_json`).
+
+### Configuration
+
+| Variable | Purpose |
+|---|---|
+| `BRIDGE1_URL`, `BRIDGE2_URL`, `BRIDGE3_URL` | Bridge HTTP endpoints (defaults `:8082`, `:8081`, `:8083`) |
+| `BRIDGE1_NUMBER`, `BRIDGE2_NUMBER`, `BRIDGE3_NUMBER` | The WhatsApp number each bridge is paired with |
+| `BRIDGE1_LABEL`, `BRIDGE2_LABEL`, `BRIDGE3_LABEL` | Human labels (`HR`, `OPS`, `REC2`) |
+| `BRIDGE1_DB_PATH` … `BRIDGE3_DB_PATH` | `store/bridgeN/messages.db` |
+| `BRIDGE1_WHATSAPP_DB_PATH` … `BRIDGE3_WHATSAPP_DB_PATH` | `store/bridgeN/whatsapp.db` |
+| `BRIDGE_MEDIA_ACQUISITION_ENABLED`, `BRIDGE_MEDIA_DOWNLOAD_TIMEOUT_S` | Fetch `[media:*]` placeholders through `/api/download` |
+| `BRIDGE_OUTBOUND_CAPTURE_ENABLED`, `BRIDGE_OUTBOUND_POLL_S` | Capture messages typed on the phone itself (default on, 10 s) |
+
+### Pairing a new phone
+
+1. Start the bridge process with its store directory; it prints a QR code (or
+   writes it to `whatsapp.db`'s companion output).
+2. On the phone: **WhatsApp → Linked devices → Link a device**, scan the QR.
+3. Wait until the bridge reports the session as connected and
+   `messages.db` starts receiving rows.
+4. Point `BRIDGEn_DB_PATH` / `BRIDGEn_WHATSAPP_DB_PATH` at that store, set
+   `BRIDGEn_NUMBER`, restart the app.
+5. Verify: `POST /api/bridges/probe` and `GET /api/bridges/diagnostics`; the
+   poller logs `[bridgeN] Poller started` and a heartbeat row appears in
+   `fazle_service_heartbeats` (`bridge_poller:bridgeN`).
+6. Send one test message **to** the bridge number and confirm it appears in
+   `wbom_whatsapp_messages` (`direction='inbound'`, `source_bridge='bridgeN'`).
+
+Nothing is sent before the send gate opens; a freshly paired bridge cannot
+auto-reply until identity, routing and the quality gates have run.
+
+### First connection: importing the store's existing history
+
+A fresh link carries the conversation history inside the bridge store
+(`from_history_sync = 1` rows and every `is_from_me = 1` row). Live routing
+ignores those rows **on purpose** — the 2026-09-02 Bridge3 incident showed that
+replaying ~2,444 old messages through routing can auto-answer history. The
+importer therefore writes history *without* routing:
+
+| What it does | What it never does |
+|---|---|
+| Persists every store row to `wbom_whatsapp_messages` with `history_imported = true`, `is_processed = true`, `source_context = 'history_backfill'` | Call `process_message()`, trigger a workflow, intent, admin command or AI reply |
+| Resolves identity (`identity_brain.detect_identity`) into `identity_role` / `identity_confidence` | Enqueue or send anything |
+| Upserts the counterparty into `fazle_unified_contacts` + `wbom_contacts` (`contact_sync.upsert_contact_from_message`) | Modify the bridge store (still `mode=ro`) |
+| Normalises `canonical_phone` / `phone_last10` / `original_sender_number` | Invent provenance: outbound history rows get `ai_generated = NULL` |
+
+Run it one of three ways:
+
+```bash
+# 1) CLI (oldest → newest, resumable)
+python -m modules.history_backfill --bridge all
+python -m modules.history_backfill --bridge bridge2 --since 2025-01-01
+python -m modules.history_backfill --bridge bridge1 --dry-run     # count only
+
+# 2) Admin API (runs in the background; poll the status endpoint)
+curl -X POST http://localhost:8200/api/bridge/history-backfill      -H "X-Internal-Key: $INTERNAL_API_KEY"      -H 'Content-Type: application/json'      -d '{"bridge": "all", "include_outbound": true}'
+curl -H "X-Internal-Key: $INTERNAL_API_KEY"      http://localhost:8200/api/bridge/history-backfill/status
+
+# 3) Automatically at startup
+#    BRIDGE_HISTORY_BACKFILL_ON_START=true
+#    BRIDGE_HISTORY_BACKFILL_SINCE=2025-01-01
+#    BRIDGE_HISTORY_BACKFILL_INCLUDE_OUTBOUND=true
+```
+
+Progress and counters live in `wbom_bridge_history_backfill` (one row per
+bridge: `pending → running → completed | failed`, plus `last_rowid`,
+`inbound_imported`, `outbound_imported`, `skipped_duplicate`,
+`contacts_upserted`, `identity_resolved`).
+
+* **Idempotent** — paging is by SQLite `rowid`; every insert is guarded by the
+  same `message_hash` uniqueness the live pipeline uses, and outbound rows are
+  additionally matched against already-stored messages (same body, counterparty
+  and bridge) so an app-sent reply is never duplicated.
+* **Resumable** — a run that is interrupted (or stopped with `max_messages`)
+  leaves the bridge in `pending`; the next run continues from `last_rowid`.
+* **Complete** — reads the whole store (both directions, 200 rows per page), not
+  just what arrived after pairing.
+* **Narrowed** — `--inbound-only`, `since`/`until`, and groups only when
+  `--include-groups` (and then only JIDs approved in `wbom_group_identities`).
+
+Excluded by design: reactions/receipts/revokes/deleted/protocol rows,
+newsletters, `status@broadcast`, unapproved groups, and media binaries (the row
+keeps its `[media:*]` placeholder and the store still holds the file).
+
+Sanity check after an import:
+
+```sql
+SELECT source_bridge,
+       count(*) FILTER (WHERE history_imported)                 AS imported,
+       count(*) FILTER (WHERE direction = 'inbound')            AS inbound,
+       count(*) FILTER (WHERE direction = 'outbound')           AS outbound,
+       count(DISTINCT canonical_phone)                          AS people
+  FROM wbom_whatsapp_messages
+ GROUP BY 1 ORDER BY 1;
+```
+
+To start over for one bridge: `--reset` (CLI) or `{"bridge": "bridge2", "reset": true}`
+(API). Resetting only clears the import state — it never deletes imported rows.
+
+---
+
+## AI providers: local and hosted
+
+Every reply-producing call goes through one chain, so switching provider is a
+configuration change, not a code change.
+
+### Provider order (`app/llm.py`)
+
+| Step | Provider | Enabled by | Notes |
+|---|---|---|---|
+| 1 | **OmniRoute / Hermes CLI** | `OMNIROUTE_API_KEY` (`OMNIROUTE_URL`, default `http://127.0.0.1:20128/v1`, `OMNIROUTE_MODEL=auto`) | Local gateway in front of Hermes |
+| 2 | **Groq** | `GROQ_API_KEY` + `GROQ_MODEL_NAME` (default `allam-2-7b`) | Hosted, fastest fallback |
+| 3 | **Local Ollama** | `OLLAMA_URL` (default `http://localhost:11434`) + `OLLAMA_MODEL`; disable with `OLLAMA_REPLY_DISABLED=true` | Default local path, Hermes-family model preferred |
+| 4 | **Kimi (Ollama cloud tag)** | `KIMI_MODEL_NAME` (default `kimi-k2.6:cloud`) | Last resort before the safe fallback text |
+| — | MiniMax | `MINIMAX_API_KEY`, `MINIMAX_MODEL` | Used by `hermes_dispatch`'s reply + semantic-gate paths |
+| — | GitHub Models | `GITHUB_TOKEN*` (+ `GITHUB_MODEL_NAME`) | Legacy; endpoint is confirmed dead and skipped |
+| — | 9Router | `NINE_ROUTER_*` | Only when `NINE_ROUTER_SINGLE_UPSTREAM_GUARANTEED=true` |
+
+If every provider fails, the caller receives the existing safe fallback text —
+never an exception and never an empty send.
+
+### Model tiers (local Ollama)
+
+`OLLAMA_MODEL` is the base model; the per-task overrides fall back to it when
+empty:
+
+| Setting | Used for |
+|---|---|
+| `OLLAMA_RUNTIME_MODEL` | routing/classification helpers |
+| `OLLAMA_BUSINESS_MODEL` | business/commercial answers |
+| `OLLAMA_MEMORY_MODEL` | memory summarisation |
+| `OLLAMA_GENERAL_MODEL` | general conversation |
+| `OLLAMA_DEEP_REASONING_MODEL` | multi-step reasoning |
+
+Tuning: `OLLAMA_NUM_CTX_*`, `OLLAMA_NUM_PREDICT_*`, `OLLAMA_TEMPERATURE_*`,
+`OLLAMA_INFER_CONCURRENCY`, `OLLAMA_CHAT_CONCURRENCY`.
+
+### Add a local model (Ollama), step by step
+
+```bash
+ollama pull hermes3:3b          # or any model you prefer
+ollama list                     # confirm the exact tag
+# .env
+OLLAMA_URL=http://localhost:11434
+OLLAMA_MODEL=hermes3:3b
+OLLAMA_GENERAL_MODEL=hermes3:3b
+```
+
+Restart the app; `app/ollama_daemon` warms the model at startup and
+`check_ollama_health()` reports availability. If the configured Hermes tag is not
+provisioned, the app silently falls back to `OLLAMA_MODEL` instead of failing.
+
+### Add a hosted provider
+
+```bash
+# Groq
+GROQ_API_KEY=...
+GROQ_MODEL_NAME=allam-2-7b
+```
+
+Any OpenAI-compatible endpoint can be registered as a **route** without touching
+code — this is the supported way to add OpenRouter, Gemini or a private
+OpenAI-compatible server:
+
+```bash
+curl -X POST http://localhost:8200/api/assistant/ops/ai-routes   -H "X-Internal-Key: $INTERNAL_API_KEY" -H 'Content-Type: application/json'   -d '{"route_id":"my-gemini","display_name":"Gemini 2.5","priority":50,
+       "transport":"direct_provider","provider":"gemini",
+       "model":"gemini-2.5-flash","base_url":"https://generativelanguage.googleapis.com/v1beta",
+       "credential_type":"api_key","credential_ref":"gemini_core_key"}'
+```
+
+Supported `transport` values: `omniroute_gateway`, `direct_provider`,
+`local_ollama`, `hermes_runner_adapter`; supported `provider` values:
+`omniroute`, `groq`, `openrouter`, `gemini`, `ollama-local`. The API key itself
+is stored separately in the system secret store
+(`POST /api/assistant/ops/system-secrets`) and referenced by `credential_ref`;
+listing, updating, deleting and `POST /api/assistant/ops/ai-routes/reorder` work
+the same way.
+
+### Adding a provider adapter in code
+
+1. Create `app/<provider>_provider.py` exposing `classify_intent_llm()`,
+   `generate_reply()`, `generate_recruitment_reply()` and `decision_call()`
+   (see `app/openai_compatible_provider.py` for the minimal shape).
+2. Register the provider in `app/unified_routing.py`'s dispatch table.
+3. Record provenance on success — call
+   `modules.ai_provenance.record_success(provider, model, task="reply")` at the
+   point the reply string is returned, otherwise the message will be stored with
+   `ai_generated = false`.
+
+### Verifying a provider
+
+* `GET /health` — aggregate health, including `llm`.
+* `app.llm.get_last_attempts()` — per-call trace of
+  `(provider, model, outcome, detail)` for the current task.
+* `wbom_whatsapp_messages.ai_provider` / `ai_model` — what actually answered in
+  production (see the outbound section above).
+* `phase3_ai_routes` — the authoritative order when an admin-configured route
+  matches the workload; unmatched workloads fall back to the chain above.
+
+---
+
+## Identity brain and identity-based domains
+
+Identity is not just a label — it selects the **business domain** and the
+**authority lane**:
+
+| Domain | Who | What may happen |
+|---|---|---|
+| `recruitment` | candidates | funnel answers, eligibility decisions, no money |
+| `escort` / `dispatch` | escort clients, buyers, escort workers | orders, roster, availability, release slips |
+| `attendance` | employees, guards | attendance drafts |
+| `cash` | employees, accountant, admin | payment drafts, cash transactions |
+| `office_internal` *(lane category, not a `SUPPORTED_DOMAINS` value)* | coordinators, operations staff | internal coordination, draft-only |
+
+Authority lanes (`modules/authority_lanes`), from most to least autonomous:
+
+| Lane | Meaning |
+|---|---|
+| `autonomous_operational` | safe read-only answers |
+| `owner_supervised_draft` | anything client- or office-facing is drafted, never sent |
+| `trusted_admin_execution` | an explicit instruction from a trusted admin |
+| `autonomous_monitoring` | the system watching itself (not a conversation) |
+| `gated_system_modification` | code/infra changes — always gated |
+
+Two independent lists (the router's `DRAFT_ALWAYS` roles and the lane module's
+client/office roles) are cross-checked at test time: a role added to one but not
+the other fails CI instead of silently reaching production.
+
+---
+
+## Payroll and accounts
+
+```
+WhatsApp message / accountant shorthand / operator form
+   → intent + identity
+   → payment_ingest            parse cash shorthand deterministically
+   → fazle_payroll_engine      employee match, transaction row, dedupe, idempotency
+   → review queue              unmatched / low-confidence → human decision
+   → fpe_cash_transactions     + ledger, period, ref
+   → payment_workflow          payment draft → admin PAID → accountant message
+   → reports / accountant_summary / monthly payroll run
+```
+
+- **Payroll engine (FPE)** owns employees, cash and income transactions, staging,
+  normalization and review queues — 51 API endpoints, all under `/api/fpe/`.
+- **Monthly payroll** (`modules/payroll`) has a real state machine —
+  `draft → reviewed → approved → locked → paid`, with `cancelled` reachable from
+  any non-paid state — and logs every transition.
+- **Payment workflow** turns a duty release into a payment draft, sends it to the
+  admin, and only records money after `PAID <id> <amount> <method>`.
+- **Payment relay** (`modules/payment_relay`) is deliberately narrow: a message
+  shaped like the owner's cash shorthand, arriving on the configured inbound
+  bridge from the configured source number, is forwarded byte-for-byte. No
+  parsing, no LLM, and it does not grow.
+- **Attendance → payroll**: attendance drafts become `wbom_attendance` rows, and
+  the eligibility preview/dry-run/reconciliation endpoints show what a payroll
+  run would do before it does it.
+
+## Escort duty roster and dispatch
+
+```
+program created (roster UI / WhatsApp)
+   → escort_roster sync      roster entry, shifts, rates, conveyance
+   → dispatch (read-only)    availability, conflicts, overlaps, suggestions
+   → assignment              assign / replace / unassign / complete (explicit)
+   → escort_lifecycle        release intent (text or slip OCR) → close program
+                             → backfill attendance → payment draft
+```
+
+`escort_lifecycle` is idempotent end-to-end: re-running on a closed program
+returns `already_closed` without duplicating drafts. `dispatch` never writes
+assignments on its own — suggestions are ranked lists a human accepts.
+
+## Recruitment funnel
+
+`modules/recruitment_flow` keeps one session per phone in
+`fazle_recruitment_sessions`, linked to `wbom_candidates` and an append-only
+`wbom_candidate_conversations` audit. Steps: name → age → area → job preference
+→ experience → phone confirmation. Turn decisions
+(`recruitment_turn_decision`) choose between answering from authority text,
+asking the next question, or escalating; `recruitment_recovery_sweep` restarts
+abandoned sessions.
+
+---
+
+## Scheduled jobs
+
+APScheduler runs inside the app (`SCHEDULER_ENABLED=true`, timezone
+`SCHEDULER_TIMEZONE=Asia/Dhaka`). Each job's last status, duration and error are
+stored in `fazle_scheduled_jobs` and shown on the dashboard's Scheduler tab.
+Every job is read-or-report only unless its name says otherwise.
+
+| Job id | Cadence (default) | Purpose |
+|---|---|---|
+| `daily_payroll_compute` | 02:00 | Compute the day's payroll |
+| `daily_db_backup` | 02:30 | `pg_dump`, rotate daily/weekly |
+| `backup_staleness_alert` | 03:00 | Alert if the newest backup is older than 48 h |
+| `payment_inactivity_sweep` | 04:00 | Flag stalled payment drafts |
+| `daily_admin_digest` | 08:00 | Yesterday's operational digest |
+| `stale_escort_reminder` | 09:00 | Programs open > 30 days |
+| `business_summary_report` | 09:00 and 21:00 | Business communication summary + approval queue |
+| `system_observation_report` | 09:15 and 21:15 | Health, jobs, incidents, financial anomalies (report only) |
+| `daily_memory_review` | 09:00 | Review memory candidates |
+| `rag_rebuild` | 18:00 | Rebuild the vector index |
+| `dlq_alert` | every 15 min | Dead-letter queue alert |
+| `lock_cleanup` | every 5 min | Release stale locks |
+| `bridge_watchdog` | every 5 min | Bridge liveness |
+| `draft_ttl_cleanup` | every 30 min | Expire old reply drafts |
+| `payment_reconciliation` | hourly | Staging vs posted cash |
+| `combined_draft_cleanup` | hourly | Draft housekeeping |
+| `health_summary` | every 6 h | Probe summary to admin |
+| `agent_incident_summary` | every 6 h | Grouped monitoring incidents |
+| `recruitment_recovery_sweep` | every 30 min | Restart stalled candidate sessions |
+
+## Reports
+
+`modules/reports` is read-only, bounded and body-free (no message content ever
+leaves in a report). Reachable from the dashboard's **Reports** tab, the
+`report` admin command, `/reports/{name}`, and the scheduled jobs above.
+
+| Report | What it answers |
+|---|---|
+| `daily_summary` | Traffic, drafts and cash for one day |
+| `monthly_payroll` | Per-employee payouts for a month |
+| `cash_position` | Cash movement over N days |
+| `payment_reconciliation` | Staging rows vs posted transactions |
+| `escort_utilization` | Programs and escorts in a date range |
+| `business_communication_summary` | Categories, pending drafts and the owner's approval queue |
+| `system_observation` | Health, stale/obsolete jobs, incidents, financial anomalies, priority |
+| `unresolved_fpe_employees` | Employee identities still unresolved |
+
+Every run is recorded in `fazle_report_runs` (who asked, duration, row count,
+error). `system_observation` never contains a write statement — it reports, it
+does not fix.
+
+---
+
 ## Configuration and deployment
 
 Application settings are defined in [`app/config.py`](app/config.py). Use
@@ -138,6 +953,23 @@ environment variables or a deployment secrets manager for credentials, provider
 API keys, bridge addresses, and contact identifiers. The app should remain in a
 non-sending mode until bridge configuration, authorization, and message-routing
 tests have passed.
+
+Schema changes are applied only through `db/migrate.py`; the newest file is
+[`091_outbound_provenance_and_history_backfill.sql`](db/migrations/091_outbound_provenance_and_history_backfill.sql),
+which adds the outbound provenance columns and the history-import state table
+described above. The writer is schema-tolerant: a database that has not run 091
+still accepts every message (the unknown columns are dropped), it just cannot
+record provenance yet.
+
+Operational switches introduced with that migration:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `BRIDGE_HISTORY_BACKFILL_ON_START` | `false` | Import each bridge store once, at startup |
+| `BRIDGE_HISTORY_BACKFILL_SINCE` | *(whole store)* | ISO lower bound for that import |
+| `BRIDGE_HISTORY_BACKFILL_INCLUDE_OUTBOUND` | `true` | Also import `is_from_me = 1` history |
+| `BRIDGE_OUTBOUND_CAPTURE_ENABLED` | `true` | Persist messages typed on the phone itself |
+| `BRIDGE_OUTBOUND_POLL_S` | `10` | How often that capture loop reads the store |
 
 For the staged clean-install, migration, bridge, AI-provider, verification, and
 rollback checklist, see [`MASTER_PRODUCTION_PLAN.md`](MASTER_PRODUCTION_PLAN.md).

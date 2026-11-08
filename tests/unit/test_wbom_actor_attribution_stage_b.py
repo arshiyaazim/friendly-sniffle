@@ -54,8 +54,11 @@ class TestSaveMessageIdempotency:
         with patch("modules.bridge_poller.fetch_one", new=AsyncMock(return_value=fake_row)) as mock_fetch:
             result = await bp._save_message("bridge3", "8801700000000", "hi", "outbound", actor_type="automation")
         assert result == 42
-        args = mock_fetch.call_args.args
-        assert args[-1] is None  # message_hash positional param
+        sql, *args = mock_fetch.call_args.args
+        # 2026-11-06: the INSERT gained provenance columns, so message_hash is
+        # located by column name rather than "last positional arg".
+        cols = sql.split("(", 1)[1].split(")", 1)[0].replace(" ", "").split(",")
+        assert dict(zip(cols, args))["message_hash"] is None
 
     async def test_source_message_ref_produces_deterministic_hash(self):
         """Same source_message_ref -> same message_hash both times, so the
@@ -200,7 +203,8 @@ class TestHermesReplyCanonicalPersistence:
             "modules.admin_directives.router", fromlist=["_deliver_hermes_reply"]
         )._deliver_hermes_reply)
         idx = source.index('from modules.bridge_poller import _save_message')
-        block = source[idx:idx + 400]
+        # window widened 2026-11-06: the call now also passes outbound_queue_id
+        block = source[idx:idx + 700]
         assert "except Exception as _persist_exc:" in block
 
 

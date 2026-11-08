@@ -92,6 +92,12 @@ CREATE TABLE IF NOT EXISTS bridge_poller_cursor (
     last_ts     TIMESTAMPTZ NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS bridge_outbound_cursor (
+    bridge      TEXT   PRIMARY KEY,
+    last_rowid  BIGINT NOT NULL DEFAULT 0,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS processed_bridge_messages (
     message_id  TEXT    NOT NULL,
     bridge      TEXT    NOT NULL,
@@ -1017,6 +1023,145 @@ def _is_bridge3_admin_recognition(bridge_name: str, phone: str) -> bool:
 
 
 # ── Main poll loop ─────────────────────────────────────────────────────────────
+
+def _fetch_history_messages(
+    messages_db: str,
+    whatsapp_db: str,
+    *,
+    after_rowid: int = 0,
+    since_ts: Optional[datetime] = None,
+    until_ts: Optional[datetime] = None,
+    include_outbound: bool = True,
+    include_groups: bool = False,
+    batch: int = 200,
+    direction: str = "both",
+) -> tuple[list[dict], int, bool]:
+    """Read a page of an entire bridge store — BOTH directions — for the
+    one-time history import (modules.history_backfill, 2026-11-06).
+
+    Deliberately a sibling of _fetch_new_messages() rather than a flag on it:
+    the live poller must never change behaviour (it stays inbound-only,
+    history-sync-excluded, cursor-based), while the importer needs the exact
+    opposite — every row that already exists in the store, including
+    `from_history_sync` rows and `is_from_me=1` rows, oldest first, paged by
+    SQLite rowid.
+
+    Returns (messages, next_rowid, done). Each message dict carries the same
+    keys the live pipeline produces (id/chat_jid/sender/content/timestamp/
+    media_type + resolved `phone`/`text`) plus `direction` and `is_group`.
+
+    Read-only (`mode=ro`), 5s timeout, never writes to the bridge store.
+    """
+    messages: list[dict] = []
+    next_rowid = int(after_rowid or 0)
+    done = True
+    try:
+        con = sqlite3.connect(f"file:{messages_db}?mode=ro", uri=True,
+                              check_same_thread=False, timeout=5.0)
+        con.row_factory = sqlite3.Row
+        _has_processed_text = has_column(con, "messages", "processed_text")
+        _pt_select = "processed_text" if _has_processed_text else "NULL AS processed_text"
+        _has_hist_flag = has_column(con, "messages", "from_history_sync")
+        _hist_select = "from_history_sync" if _has_hist_flag else "0 AS from_history_sync"
+
+        where = ["rowid > :after", "COALESCE(media_type, '') NOT IN ('reaction','receipt','revoke','deleted','protocol')"]
+        params: dict = {"after": next_rowid, "limit": int(batch)}
+        if since_ts is not None:
+            where.append("datetime(timestamp) >= datetime(:since)")
+            params["since"] = since_ts.astimezone(timezone.utc).replace(microsecond=0).isoformat(sep=" ")
+        if until_ts is not None:
+            where.append("datetime(timestamp) <= datetime(:until)")
+            params["until"] = until_ts.astimezone(timezone.utc).replace(microsecond=0).isoformat(sep=" ")
+        _dir = (direction or "both").strip().lower()
+        if not include_outbound or _dir == "inbound":
+            where.append("COALESCE(is_from_me, 0) = 0")
+        elif _dir == "outbound":
+            where.append("COALESCE(is_from_me, 0) = 1")
+        if not include_groups:
+            where.append("chat_jid NOT LIKE '%@g.us'")
+        where.append("chat_jid NOT LIKE '%@newsletter'")
+        where.append("chat_jid != 'status@broadcast'")
+
+        rows = con.execute(
+            f"""
+            SELECT rowid AS _rowid, id, chat_jid, sender, content, timestamp,
+                   media_type, {_pt_select}, filename, url,
+                   COALESCE(is_from_me, 0) AS is_from_me, {_hist_select}
+              FROM messages
+             WHERE {' AND '.join(where)}
+             ORDER BY rowid ASC
+             LIMIT :limit
+            """,
+            params,
+        ).fetchall()
+
+        if rows:
+            next_rowid = int(rows[-1]["_rowid"])
+            if len(rows) >= int(batch):
+                done = False
+
+        lid_map = _load_lid_map(whatsapp_db)
+        for row in rows:
+            msg = dict(row)
+            msg.pop("_rowid", None)
+            chat_jid = str(msg.get("chat_jid") or "")
+            sender_raw = str(msg.get("sender") or "").split(":")[0]
+            sender_lid = sender_raw.split("@")[0]
+            is_from_me = int(msg.get("is_from_me") or 0)
+            is_group = chat_jid.endswith("@g.us")
+
+            if is_group:
+                phone = lid_map.get(sender_lid, "") or (
+                    chat_jid.replace("@s.whatsapp.net", "") if chat_jid.endswith("@s.whatsapp.net") else ""
+                )
+                if not phone:
+                    phone = f"unresolved:{sender_lid}" if sender_lid else "unresolved:group"
+            elif is_from_me:
+                # Counterparty is the chat, not the (own) sender.
+                phone = lid_map.get(chat_jid.split("@")[0], "")
+                if not phone and chat_jid.endswith("@s.whatsapp.net"):
+                    phone = chat_jid.replace("@s.whatsapp.net", "")
+                if not phone:
+                    phone = lid_map.get(sender_lid, "")
+                if not phone:
+                    phone = f"unresolved:{chat_jid.split('@')[0] or 'unknown'}"
+            else:
+                phone = lid_map.get(sender_lid, "")
+                if not phone:
+                    if chat_jid.endswith("@s.whatsapp.net"):
+                        phone = chat_jid.replace("@s.whatsapp.net", "")
+                    else:
+                        phone = f"unresolved:{sender_lid}" if sender_lid else "unresolved:unknown"
+
+            text = (msg.get("content") or msg.get("processed_text") or "").strip()
+            media_type = str(msg.get("media_type") or "").strip().lower() or "text"
+            if not text:
+                if msg.get("filename") or msg.get("url"):
+                    text = f"[media:{media_type}]"
+                else:
+                    continue  # nothing to store — not a message body
+
+            msg["phone"] = phone
+            msg["text"] = text
+            msg["direction"] = "outbound" if is_from_me else "inbound"
+            msg["is_group"] = is_group
+            messages.append(msg)
+        con.close()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[history_backfill] store read failed for %s: %s", messages_db, exc)
+        return messages, next_rowid, True
+    return messages, next_rowid, done
+
+
+async def insert_core_message(values: dict) -> Optional[int]:
+    """Schema-tolerant public insert used by the history importer.
+
+    Same writer as every other canonical row (`_core_insert`), so history rows
+    obey the same column set, the same message_hash idempotency, and the same
+    graceful degradation on a pre-091 database.
+    """
+    return await _core_insert(values)
+
 
 async def _poll_bridge(config: dict):
     bridge_name: str = config["name"]
@@ -2103,6 +2248,119 @@ async def _poll_bridge(config: dict):
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
+# ── Live outbound capture (2026-11-06) ────────────────────────────────────────
+# The poller above only ever reads `is_from_me = 0` (plus one bridge2 self-chat
+# special case). Anything typed on the linked PHONE — i.e. every message the
+# owner sends by hand from the bridge number's own WhatsApp — was therefore
+# never written to `wbom_whatsapp_messages`, so the canonical history had gaps
+# exactly where a human had been talking.
+#
+# This loop reads the store's `is_from_me = 1` rows incrementally and persists
+# them through modules.history_backfill.import_message(): read-only against the
+# bridge store, no routing, no replies, no workflows, idempotent through the
+# same message_hash uniqueness, and it skips anything the app itself already
+# recorded (same body + counterparty + bridge => "duplicate").
+#
+# Cursor is a rowid high-water mark in `bridge_outbound_cursor`. On first run it
+# is seeded to MAX(rowid) so pre-existing history stays the history importer's
+# job (one clear owner per message), not this loop's.
+
+def _store_max_rowid(messages_db: str) -> int:
+    try:
+        con = sqlite3.connect(f"file:{messages_db}?mode=ro", uri=True,
+                              check_same_thread=False, timeout=5.0)
+        row = con.execute("SELECT COALESCE(MAX(rowid), 0) FROM messages").fetchone()
+        con.close()
+        return int(row[0] or 0)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("[outbound_capture] max-rowid read failed for %s: %s", messages_db, exc)
+        return 0
+
+
+async def _get_outbound_rowid(bridge: str, messages_db: str) -> int:
+    row = await fetch_one(
+        "SELECT last_rowid FROM bridge_outbound_cursor WHERE bridge = $1", bridge
+    )
+    if row:
+        return int(row["last_rowid"] or 0)
+    seed = await asyncio.get_event_loop().run_in_executor(None, _store_max_rowid, messages_db)
+    await execute(
+        """INSERT INTO bridge_outbound_cursor (bridge, last_rowid, updated_at)
+           VALUES ($1, $2, NOW())
+           ON CONFLICT (bridge) DO NOTHING""",
+        bridge, seed,
+    )
+    log.info("[%s] outbound capture seeded at rowid=%s (history is the importer's job)",
+             bridge, seed)
+    return seed
+
+
+async def _set_outbound_rowid(bridge: str, rowid: int) -> None:
+    await execute(
+        """UPDATE bridge_outbound_cursor SET last_rowid = $2, updated_at = NOW()
+            WHERE bridge = $1""",
+        bridge, int(rowid),
+    )
+
+
+def _outbound_capture_enabled() -> bool:
+    return os.getenv("BRIDGE_OUTBOUND_CAPTURE_ENABLED", "true").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _outbound_poll_seconds() -> float:
+    try:
+        return max(2.0, float(os.getenv("BRIDGE_OUTBOUND_POLL_S", "10")))
+    except ValueError:
+        return 10.0
+
+
+async def _poll_bridge_outbound(config: dict) -> None:
+    bridge_name: str = config["name"]
+    messages_db: str = config["messages_db"]
+    whatsapp_db: str = config["whatsapp_db"]
+    interval = _outbound_poll_seconds()
+    log.info("[%s] outbound capture started (interval=%ss)", bridge_name, interval)
+
+    from modules.history_backfill import import_message
+
+    rowid = await _get_outbound_rowid(bridge_name, messages_db)
+    while True:
+        try:
+            loop = asyncio.get_event_loop()
+            page, rowid, _done = await loop.run_in_executor(
+                None,
+                lambda: _fetch_history_messages(
+                    messages_db, whatsapp_db,
+                    after_rowid=rowid, direction="outbound", batch=100,
+                ),
+            )
+            for msg in page:
+                if msg.get("is_group"):
+                    continue  # groups stay out of the canonical history by policy
+                try:
+                    outcome = await import_message(
+                        bridge_name, msg,
+                        source_context="live_device_outbound",
+                        history_imported=False,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("[%s] outbound capture row %s failed: %s",
+                                bridge_name, msg.get("id"), exc)
+                    continue
+                if outcome.get("outcome") == "imported":
+                    log.info("[%s] captured device-sent message %s -> %s",
+                             bridge_name, msg.get("id"), msg.get("phone"))
+            if page:
+                await _set_outbound_rowid(bridge_name, rowid)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[%s] outbound capture cycle failed: %s", bridge_name, exc)
+        await asyncio.sleep(interval)
+
+
 async def start_pollers():
     """Initialize DB tables and launch background poll tasks for both bridges."""
     await init_tables()
@@ -2116,7 +2374,12 @@ async def start_pollers():
         log.warning(f"[send-control] startup enable failed: {_sce}")
     for config in BRIDGE_CONFIGS:
         asyncio.create_task(_poll_bridge(config))
-    log.info("Bridge pollers running for bridge1 + bridge2 + bridge3")
+        if _outbound_capture_enabled():
+            asyncio.create_task(_poll_bridge_outbound(config))
+    log.info(
+        "Bridge pollers running for bridge1 + bridge2 + bridge3 (outbound capture=%s)",
+        "on" if _outbound_capture_enabled() else "off",
+    )
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -2728,6 +2991,131 @@ async def _mark_core_queue_status(source: str, msg: dict, status: str, error: st
         log.warning("[core_copy] queue status update failed bridge=%s msg_id=%s err=%s", source, msg_id, e)
 
 
+_CORE_COLUMN_CACHE: dict = {}
+
+# Columns that are ALWAYS written explicitly (even when NULL), exactly like
+# this writer's original fixed-column INSERT did. Optional/provenance columns
+# are written only when they carry a value — except ai_generated, whose NULL
+# is meaningful ("unknown").
+_BASE_MESSAGE_COLUMNS = frozenset({
+    "sender_number", "message_body", "message_type", "direction", "platform",
+    "is_processed", "contact_identifier", "identity_role", "identity_confidence",
+    "workflow_triggered", "receiver_number", "conversation_key",
+    "intent_detected", "extracted_text", "actor_type", "actor_id", "message_hash",
+})
+
+
+async def _core_columns() -> frozenset:
+    """Columns actually present on wbom_whatsapp_messages.
+
+    Schema tolerance (2026-11-06, migration 091): the provenance columns
+    (source_bridge, ai_*, outbound_queue_id, delivery_status, external_id,
+    history_imported) are added by migration 091. A database that has not run
+    it yet must still accept every message — the writer drops unknown columns
+    instead of failing the INSERT. Cached for the process lifetime (a table's
+    column set cannot change under a running app; migrations need a restart).
+    """
+    cached = _CORE_COLUMN_CACHE.get("wbom_whatsapp_messages")
+    if cached is not None:
+        return cached
+    cols: frozenset = frozenset()
+    try:
+        from modules.identity_resolver import available_columns
+        cols = await available_columns("wbom_whatsapp_messages")
+    except Exception as exc:  # noqa: BLE001
+        log.debug("[core_insert] column introspection failed: %s", exc)
+    _CORE_COLUMN_CACHE["wbom_whatsapp_messages"] = cols
+    return cols
+
+
+def reset_core_column_cache() -> None:
+    """Test hook — same convention as identity_resolver.reset_column_cache()."""
+    _CORE_COLUMN_CACHE.clear()
+
+
+async def _core_insert(
+    values: dict,
+    *,
+    on_conflict: str = "ON CONFLICT (message_hash) DO NOTHING",
+) -> Optional[int]:
+    """INSERT one wbom_whatsapp_messages row and return its message_id.
+
+    Single writer for every canonical row this module produces (outbound
+    automation replies, the inbound fallback, the queue dispatcher's
+    send-success write, the history importer). Columns absent from the live
+    schema are dropped, so the same call works before and after migration 091.
+    """
+    cols = await _core_columns()
+    if cols:
+        values = {k: v for k, v in values.items() if k in cols}
+    if not values:
+        return None
+    jsonb_cols = {"metadata_json"}
+    names = list(values)
+    placeholders = ", ".join(
+        f"${i + 1}" + ("::jsonb" if n in jsonb_cols else "") for i, n in enumerate(names)
+    )
+    sql = (
+        f"INSERT INTO wbom_whatsapp_messages ({', '.join(names)}) "
+        f"VALUES ({placeholders}) {on_conflict} RETURNING message_id"
+    )
+    args = [
+        json.dumps(values[n], ensure_ascii=False)
+        if n in jsonb_cols and values[n] is not None else values[n]
+        for n in names
+    ]
+    try:
+        row = await fetch_one(sql, *args)
+        return int(row["message_id"]) if row and row.get("message_id") is not None else None
+    except Exception as exc:  # noqa: BLE001
+        # A database without uq_wbom_messages_hash cannot honour ON CONFLICT.
+        if "no unique or exclusion constraint" in str(exc).lower():
+            try:
+                row = await fetch_one(sql.replace(on_conflict, "").strip(), *args)
+                return int(row["message_id"]) if row and row.get("message_id") is not None else None
+            except Exception as exc2:  # noqa: BLE001
+                log.warning(f"Message save error: {exc2}")
+                return None
+        log.warning(f"Message save error: {exc}")
+        return None
+
+
+def _ai_fields(
+    actor_type: str,
+    ai_generated,
+    ai_provider: Optional[str],
+    ai_model: Optional[str],
+    ai_task: Optional[str],
+) -> dict:
+    """Normalise the provenance arguments for a row.
+
+    ai_generated may be:
+      None / "auto"  -> decide from the live generation context
+      "unknown"      -> store NULL (history imports: origin cannot be proven)
+      True / False   -> caller knows
+    """
+    try:
+        from modules import ai_provenance
+    except Exception:  # noqa: BLE001
+        ai_provenance = None
+    if isinstance(ai_generated, str):
+        mode = ai_generated.strip().lower()
+        if mode == "unknown":
+            return {"ai_generated": None, "ai_provider": ai_provider,
+                    "ai_model": ai_model, "ai_task": ai_task}
+        ai_generated = None
+    if ai_provenance is None:
+        return {"ai_generated": ai_generated, "ai_provider": ai_provider,
+                "ai_model": ai_model, "ai_task": ai_task}
+    return ai_provenance.resolve(
+        actor_type=actor_type,
+        ai_generated=ai_generated,
+        provider=ai_provider,
+        model=ai_model,
+        task=ai_task,
+    )
+
+
 async def _save_message(
     source: str,
     sender: str,
@@ -2742,6 +3130,16 @@ async def _save_message(
     actor_type: str = "",
     actor_id: str = "",
     source_message_ref: str = "",
+    *,
+    ai_generated=None,
+    ai_provider: Optional[str] = None,
+    ai_model: Optional[str] = None,
+    ai_task: Optional[str] = None,
+    outbound_queue_id: Optional[int] = None,
+    delivery_status: Optional[str] = None,
+    external_id: str = "",
+    history_imported: bool = False,
+    extra_meta: Optional[dict] = None,
 ) -> Optional[int]:
     """actor_type/actor_id (2026-08-28, Stage B1/B4 -- canonical-history
     attribution): who/what produced THIS row's content -- a different
@@ -2769,36 +3167,233 @@ async def _save_message(
     index's own semantics, so pre-existing callers that don't pass this
     can never spuriously collide with each other or with a caller that
     does. Returns the inserted row's message_id, or None if the row
-    already existed (a genuine retry-noop) or an error occurred."""
+    already existed (a genuine retry-noop) or an error occurred.
+
+    2026-11-06 (outbound parity): this writer now fills the same phone
+    columns the inbound raw copy always filled -- canonical_phone,
+    phone_last10, original_sender_number -- plus source_bridge and the
+    migration-091 provenance columns. `ai_*` default to "decide from the
+    live generation context" (modules.ai_provenance), so a row written
+    immediately after a successful LLM call is marked ai_generated=true with
+    the provider/model that answered, while a rule/template reply stays
+    false. See persist_outbound_message() for the queue-driven path.
+    """
     _receiver = _source_to_receiver(source)
     _conv_key = f"{sender}:{source}" if sender else None
     _msg_hash = (
         _core_message_hash(f"outbound:{source}", source_message_ref)
         if source_message_ref else None
     )
+    _ai = _ai_fields(actor_type, ai_generated, ai_provider, ai_model, ai_task)
+    _meta = None
+    if extra_meta:
+        _meta = dict(extra_meta)
+        if ai_task or _ai.get("ai_task"):
+            _meta.setdefault("ai_task", _ai.get("ai_task"))
+    values = {
+        "sender_number": sender,
+        "message_body": text,
+        "message_type": msg_type,
+        "direction": direction,
+        "platform": source,
+        "is_processed": True,
+        "contact_identifier": sender,
+        "identity_role": identity_role or None,
+        "identity_confidence": identity_confidence or None,
+        "workflow_triggered": workflow or None,
+        "receiver_number": _receiver or None,
+        "conversation_key": _conv_key,
+        "intent_detected": intent_detected or None,
+        "extracted_text": extracted_text or None,
+        "actor_type": actor_type or None,
+        "actor_id": actor_id or None,
+        "message_hash": _msg_hash,
+        "canonical_phone": _storage_canonical_phone(sender),
+        "phone_last10": _storage_phone_last10(sender),
+        "original_sender_number": sender,
+        "source_bridge": source,
+        "outbound_queue_id": outbound_queue_id,
+        "delivery_status": delivery_status,
+        "external_id": external_id or None,
+        "history_imported": bool(history_imported),
+        "metadata_json": _meta,
+        **_ai,
+    }
+    return await _core_insert({
+        k: v for k, v in values.items()
+        if v is not None or k in _BASE_MESSAGE_COLUMNS or k == "ai_generated"
+    })
+
+
+async def persist_outbound_message(
+    *,
+    source_bridge: str,
+    recipient: str,
+    text: str,
+    msg_type: str = "text",
+    actor_type: str = "automation",
+    actor_id: str = "",
+    ai_generated="auto",
+    ai_provider: Optional[str] = None,
+    ai_model: Optional[str] = None,
+    ai_task: Optional[str] = None,
+    outbound_queue_id: Optional[int] = None,
+    external_id: str = "",
+    delivery_status: str = "sent",
+    purpose: str = "",
+    source_message_ref: str = "",
+    failover_from: Optional[str] = None,
+    meta: Optional[dict] = None,
+) -> Optional[int]:
+    """Canonical outbound persistence at the TRANSPORT boundary (2026-11-06).
+
+    Called by modules.outbound.sweep_once() immediately after a bridge accepts
+    a send. Until this existed, nothing wrote a message row at the moment a
+    message actually left the system: a row existed only if the enqueuing call
+    site happened to pre-save one, it named the requested bridge (not the
+    bridge that actually accepted after failover), and it could never say
+    whether delivery succeeded.
+
+    Behaviour:
+      1. If `outbound_queue_id` is given and a row already carries it, that row
+         is upgraded in place (bridge, delivery status, external id, phone
+         normalisation, AI provenance). Idempotent: the unique partial index on
+         outbound_queue_id guarantees one row per queue item even if the
+         dispatcher retries.
+      2. Otherwise, a pre-saved but unconfirmed row for the same
+         recipient+body within the last 15 minutes is upgraded (the legacy
+         call-site behaviour this replaces).
+      3. Otherwise a new row is inserted, hashed deterministically on
+         (bridge, queue id) so a retry can never duplicate it.
+
+    `sender_number` keeps the existing contract for direction='outbound': the
+    COUNTERPARTY's number (the human on the other side), while `receiver_number`
+    and `source_bridge` identify OUR bridge. `ai_generated` defaults to "auto"
+    (decide from the live generation context); pass "unknown" when the origin
+    genuinely cannot be proven.
+    """
+    recipient = (recipient or "").strip()
+    canonical = _storage_canonical_phone(recipient)
+    last10 = _storage_phone_last10(recipient)
+    _ai = _ai_fields(actor_type, ai_generated, ai_provider, ai_model, ai_task)
+    _meta = {k: v for k, v in {
+        "provenance": "outbound_transport",
+        "outbound_queue_id": outbound_queue_id,
+        "purpose": purpose or None,
+        "delivery_status": delivery_status,
+        "external_id": external_id or None,
+        "failover_from": failover_from,   # bridge originally requested, when different
+        **(meta or {}),
+    }.items() if v is not None}
+
+    cols = await _core_columns()
+    _has = (lambda c: (c in cols) if cols else True)
+
+    # 1. Upgrade the row that already belongs to this queue item.
+    if outbound_queue_id and _has("outbound_queue_id"):
+        try:
+            row = await fetch_one(
+                """
+                UPDATE wbom_whatsapp_messages
+                   SET source_bridge   = $2,
+                       platform        = $2,
+                       delivery_status = $3,
+                       external_id     = COALESCE($4, external_id),
+                       canonical_phone = COALESCE(canonical_phone, $5),
+                       phone_last10    = COALESCE(phone_last10, $6),
+                       ai_generated    = $7,
+                       ai_provider     = COALESCE($8, ai_provider),
+                       ai_model        = COALESCE($9, ai_model),
+                       ai_task         = COALESCE($10, ai_task),
+                       is_processed    = true,
+                       metadata_json   = COALESCE(metadata_json, '{}'::jsonb) || $11::jsonb
+                 WHERE outbound_queue_id = $1
+                 RETURNING message_id
+                """,
+                int(outbound_queue_id), source_bridge, delivery_status,
+                external_id or None, canonical, last10,
+                _ai.get("ai_generated"), _ai.get("ai_provider"),
+                _ai.get("ai_model"), _ai.get("ai_task"),
+                json.dumps(_meta, ensure_ascii=False),
+            )
+            if row:
+                return int(row["message_id"])
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"[outbound_persist] queue-linked upgrade failed (q={outbound_queue_id}): {exc}")
+
+    # 2. Upgrade a pre-saved, still-unconfirmed row for the same message.
     try:
         row = await fetch_one(
             """
-            INSERT INTO wbom_whatsapp_messages
-                (sender_number, message_body, message_type, direction,
-                 platform, is_processed, contact_identifier,
-                 identity_role, identity_confidence, workflow_triggered,
-                 receiver_number, conversation_key, intent_detected, extracted_text,
-                 actor_type, actor_id, message_hash)
-            VALUES ($1, $2, $3, $4, $5, true, $1, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-            ON CONFLICT (message_hash) DO NOTHING
-            RETURNING message_id
+            SELECT message_id FROM wbom_whatsapp_messages
+             WHERE direction = 'outbound'
+               AND message_body = $1
+               AND (canonical_phone = $2 OR sender_number = $3)
+               AND received_at > NOW() - INTERVAL '15 minutes'
+               AND delivery_status IS NULL
+             ORDER BY message_id DESC
+             LIMIT 1
             """,
-            sender, text, msg_type, direction, source,
-            identity_role or None, identity_confidence or None, workflow or None,
-            _receiver or None, _conv_key,
-            intent_detected or None, extracted_text or None,
-            actor_type or None, actor_id or None, _msg_hash,
+            text, canonical, recipient,
         )
-        return int(row["message_id"]) if row else None
-    except Exception as e:
-        log.warning(f"Message save error: {e}")
-        return None
+        if row:
+            await execute(
+                """
+                UPDATE wbom_whatsapp_messages
+                   SET source_bridge = $2,
+                       platform = $2,
+                       delivery_status = $3,
+                       external_id = COALESCE($4, external_id),
+                       canonical_phone = COALESCE(canonical_phone, $5),
+                       phone_last10 = COALESCE(phone_last10, $6),
+                       ai_generated = $7,
+                       ai_provider = COALESCE($8, ai_provider),
+                       ai_model = COALESCE($9, ai_model),
+                       ai_task = COALESCE($10, ai_task),
+                       outbound_queue_id = COALESCE($11, outbound_queue_id),
+                       metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $12::jsonb
+                 WHERE message_id = $1
+                """,
+                int(row["message_id"]), source_bridge, delivery_status,
+                external_id or None, canonical, last10,
+                _ai.get("ai_generated"), _ai.get("ai_provider"),
+                _ai.get("ai_model"), _ai.get("ai_task"),
+                outbound_queue_id, json.dumps(_meta, ensure_ascii=False),
+            )
+            return int(row["message_id"])
+    except Exception as exc:  # noqa: BLE001
+        log.debug(f"[outbound_persist] pre-save upgrade skipped: {exc}")
+
+    # 3. Insert a fresh row, deterministic on the queue id (retry-safe).
+    ref = source_message_ref or (f"queue:{outbound_queue_id}" if outbound_queue_id else "")
+    values = {
+        "sender_number": recipient,
+        "message_body": text,
+        "message_type": msg_type,
+        "direction": "outbound",
+        "platform": source_bridge,
+        "is_processed": True,
+        "contact_identifier": recipient,
+        "receiver_number": _source_to_receiver(source_bridge) or None,
+        "conversation_key": f"{recipient}:{source_bridge}" if recipient else None,
+        "actor_type": actor_type or None,
+        "actor_id": actor_id or None,
+        "message_hash": _core_message_hash(f"outbound:{source_bridge}", ref) if ref else None,
+        "canonical_phone": canonical,
+        "phone_last10": last10,
+        "original_sender_number": recipient,
+        "source_bridge": source_bridge,
+        "outbound_queue_id": outbound_queue_id,
+        "delivery_status": delivery_status,
+        "external_id": external_id or None,
+        "history_imported": False,
+        "metadata_json": _meta,
+        **_ai,
+    }
+    return await _core_insert({
+        k: v for k, v in values.items()
+        if v is not None or k in _BASE_MESSAGE_COLUMNS or k == "ai_generated"
+    })
 
 
 def _source_to_receiver(source: str) -> str:
@@ -3338,7 +3933,8 @@ async def process_bridge_inbound(
                     await _record_reply(phone)
                     await _save_message(bridge_name, phone, reply, "outbound",
                                         identity_role=id_role, identity_confidence=id_conf,
-                                        workflow=msg_intent, actor_type="automation")
+                                        workflow=msg_intent, actor_type="automation",
+                                        outbound_queue_id=qid)
                     log.info(
                         "[%s] Admin-Hermes reply sent directly (customer safety "
                         "cascade bypassed for admin role) to %s qid=%s",
@@ -3567,7 +4163,8 @@ async def process_bridge_inbound(
                         await _record_reply(phone)
                         await _save_message(bridge_name, phone, reply, "outbound",
                                             identity_role=id_role, identity_confidence=id_conf,
-                                            workflow=msg_intent, actor_type="automation")
+                                            workflow=msg_intent, actor_type="automation",
+                                            outbound_queue_id=qid)
                         log.info("[%s] Queued reply to %s qid=%s", bridge_name, phone, qid)
                     else:
                         log.warning("[%s] Reply enqueue failed/deduped for %s", bridge_name, phone)

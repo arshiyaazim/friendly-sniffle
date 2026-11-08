@@ -73,6 +73,18 @@ def _record_attempt(provider: str, model: str, outcome: str, detail: str = "") -
     attempts = list(_LAST_ATTEMPTS.get())
     attempts.append({"provider": provider, "model": model, "outcome": outcome, "detail": detail[:200]})
     _LAST_ATTEMPTS.set(attempts)
+    # 2026-11-06 — outbound provenance: a successful provider response is the
+    # only proof that a model wrote the text about to be persisted/enqueued.
+    # Recorded in modules.ai_provenance (its own ContextVar, same per-task
+    # isolation as the trace above) so the message writers can mark the row
+    # `ai_generated=true` with the provider/model that actually answered.
+    # Never allowed to affect generation: any failure here is swallowed.
+    if outcome == "success":
+        try:
+            from modules import ai_provenance
+            ai_provenance.record_success(provider, model)
+        except Exception:  # noqa: BLE001 — provenance must never break a reply
+            pass
 
 
 # ── Local Hermes-family model preference (2026-08-05) ──────────────────────
@@ -173,6 +185,8 @@ async def classify_intent_llm(text: str) -> str:
     was also updated the same day (see app/config.py's groq_model_name)
     after llama-3.1-8b-instant was confirmed retired by Groq.
     """
+    from modules import ai_provenance as _ai_provenance
+    _ai_provenance.set_task("classify_intent")
     settings = get_settings()
     from app import unified_routing
     if unified_routing.workload_enabled(settings, "simple_intent_classification"):
@@ -242,6 +256,8 @@ async def generate_reply(
     Every successful reply is logged to llm_learning_memory. Every attempt
     (success, empty, error, or skipped) is recorded — see get_last_attempts().
     """
+    from modules import ai_provenance as _ai_provenance
+    _ai_provenance.set_task("reply")
     settings = get_settings()
     _LAST_ATTEMPTS.set([])
     from app import unified_routing
@@ -449,6 +465,8 @@ async def generate_recruitment_reply(
     source: str = "unknown",
 ) -> str:
     """Recruitment-specific reply. OmniRoute → Groq → local Ollama/Hermes → Kimi → safe fallback."""
+    from modules import ai_provenance as _ai_provenance
+    _ai_provenance.set_task("recruitment_reply")
     settings = get_settings()
     _LAST_ATTEMPTS.set([])
     from app import unified_routing
@@ -632,6 +650,8 @@ async def generate_chat_reply(
     2026-08-05: the admin Chat Lab path is out of scope for the reply-
     generation/polish chain change — left untouched deliberately.
     """
+    from modules import ai_provenance as _ai_provenance
+    _ai_provenance.set_task("chat_reply")
     settings = get_settings()
 
     if not settings.ollama_reply_disabled:
@@ -695,6 +715,8 @@ async def generate_rag_answer(
     model: str | None = None,
 ) -> Optional[str]:
     """Pass-through so callers using `llm as ai` still work."""
+    from modules import ai_provenance as _ai_provenance
+    _ai_provenance.set_task("rag_answer")
     from app import ollama
     return await ollama.generate_rag_answer(question=question, context=context, model=model)
 
@@ -731,6 +753,8 @@ async def decision_call(
     orchestrator simply forwards callers' intent. Timeout is per-provider
     call, ALSO bounded to <=25s inside each provider's decision_call.
     """
+    from modules import ai_provenance as _ai_provenance
+    _ai_provenance.set_task("decision")
     settings = get_settings()
     _LAST_ATTEMPTS.set([])
     from app import unified_routing

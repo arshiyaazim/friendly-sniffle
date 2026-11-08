@@ -25,6 +25,22 @@ from shared.reply_policy import (
     build_whatsapp_recruitment_policy,
 )
 
+def _record_ai_provenance(provider: str, model: str, task: str) -> None:
+    """2026-11-06 — mark a successful model response for outbound provenance.
+
+    app/llm.py's provider chain records provenance via _record_attempt(), but
+    this module is also called DIRECTLY (modules.route_b, modules.knowledge_base,
+    unified_routing's ollama-local route), so the success point here must record
+    it too or those replies would look like non-AI text in
+    wbom_whatsapp_messages. Never raises.
+    """
+    try:
+        from modules import ai_provenance
+        ai_provenance.record_success(provider, model, task=task)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 log = logging.getLogger("fazle.ollama")
 
 # Shared with modules.route_b_handoff -- lets it detect "Ollama produced
@@ -288,6 +304,7 @@ async def generate_reply(
                 asyncio.create_task(_log_llm(
                     "generate_reply", use_model, prompt, reply_text, latency_ms,
                 ))
+                _record_ai_provenance("ollama", use_model, "reply")
                 return reply_text
             else:
                 log.warning("[ollama] generate_reply non-200: status=%d body=%.100s",
@@ -375,6 +392,7 @@ async def generate_recruitment_reply(
                 asyncio.create_task(_log_llm(
                     "generate_recruitment_reply", use_model, prompt, reply_text, latency_ms,
                 ))
+                _record_ai_provenance("ollama", use_model, "recruitment_reply")
                 return reply_text
             log.warning("[ollama] generate_recruitment_reply non-200: status=%d body=%.100s",
                         r.status_code, r.text)

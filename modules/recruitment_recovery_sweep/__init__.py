@@ -702,6 +702,7 @@ async def _reconcile_confirmed_sends() -> int:
             await _save_message(
                 row["source_bridge"] or "bridge3", row["recipient"], row["body"], "outbound",
                 workflow=row["purpose"], actor_type="automation",
+                outbound_queue_id=row["id"], delivery_status="sent",
             )
             reconciled += 1
         except Exception as exc:  # noqa: BLE001 -- one bad row must not abort the rest
