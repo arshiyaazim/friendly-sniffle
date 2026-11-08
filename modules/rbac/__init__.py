@@ -205,10 +205,19 @@ async def get_admin_by_username(username: str) -> Optional[dict]:
     u = _normalize_username(username)
     if not u:
         return None
-    row = await fetch_one(
-        "SELECT id, phone, name, status, username, password_hash FROM fazle_admins WHERE LOWER(username)=$1",
-        u,
-    )
+    try:
+        row = await fetch_one(
+            "SELECT id, phone, name, status, username, password_hash, must_change_password "
+            "FROM fazle_admins WHERE LOWER(username)=$1",
+            u,
+        )
+    except Exception:
+        # pre-092 schema (no must_change_password column yet)
+        row = await fetch_one(
+            "SELECT id, phone, name, status, username, password_hash "
+            "FROM fazle_admins WHERE LOWER(username)=$1",
+            u,
+        )
     return dict(row) if row else None
 
 
@@ -237,6 +246,215 @@ async def max_role_level(admin_id: int) -> int:
 
 
 # ── bootstrap ────────────────────────────────────────────────────────────────
+
+DEFAULT_BOOTSTRAP_USERNAME = "admin"
+DEFAULT_BOOTSTRAP_PHONE = "8800000000000"   # placeholder only when ADMIN_NUMBERS is empty
+
+
+def bootstrap_credential_env() -> tuple[str, str]:
+    """(username, password) from the environment. Password may be "" => generate."""
+    user = _normalize_username(os.getenv("BOOTSTRAP_ADMIN_USERNAME") or DEFAULT_BOOTSTRAP_USERNAME)
+    if not user:
+        user = DEFAULT_BOOTSTRAP_USERNAME
+    return user, (os.getenv("BOOTSTRAP_ADMIN_PASSWORD") or "").strip()
+
+
+def generate_bootstrap_password() -> str:
+    """Readable one-time password (no ambiguous characters, 18 chars)."""
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+    return "".join(secrets.choice(alphabet) for _ in range(18))
+
+
+async def _any_credential_exists() -> bool:
+    try:
+        row = await fetch_one(
+            "SELECT 1 AS ok FROM fazle_admins "
+            "WHERE username IS NOT NULL AND password_hash IS NOT NULL LIMIT 1"
+        )
+        return bool(row)
+    except Exception:
+        return True  # fail closed: never overwrite credentials on a lookup error
+
+
+async def _first_superadmin_id() -> Optional[int]:
+    try:
+        v = await fetch_val(
+            "SELECT a.id FROM fazle_admins a "
+            "JOIN fazle_admin_roles ar ON ar.admin_id = a.id "
+            "WHERE ar.role_name = 'superadmin' AND a.status = 'active' "
+            "ORDER BY a.id LIMIT 1"
+        )
+        if v is not None:
+            return int(v)
+    except Exception:
+        pass
+    try:
+        v = await fetch_val(
+            "SELECT id FROM fazle_admins WHERE status='active' ORDER BY id LIMIT 1"
+        )
+        return int(v) if v is not None else None
+    except Exception:
+        return None
+
+
+async def _create_owner_admin() -> int:
+    """Create the very first admin when none exists (empty ADMIN_NUMBERS)."""
+    raw_phone = ""
+    phones = _bootstrap_phones()
+    if phones:
+        raw_phone = phones[0]
+    else:
+        raw_phone = (os.getenv("BOOTSTRAP_ADMIN_PHONE") or DEFAULT_BOOTSTRAP_PHONE).strip()
+    phone = _normalize_phone(raw_phone) or DEFAULT_BOOTSTRAP_PHONE
+    admin_id = await fetch_val(
+        "INSERT INTO fazle_admins (phone, name, status, notes) "
+        "VALUES ($1, 'Owner', 'active', 'auto-bootstrap (first install)') RETURNING id",
+        phone,
+    )
+    try:
+        role_exists = await fetch_val("SELECT 1 FROM fazle_roles WHERE name='superadmin'")
+        if role_exists:
+            await execute(
+                "INSERT INTO fazle_admin_roles (admin_id, role_name, granted_by) "
+                "VALUES ($1,'superadmin','bootstrap') ON CONFLICT DO NOTHING",
+                admin_id,
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"[rbac] could not grant superadmin to bootstrap admin: {exc}")
+    return int(admin_id)
+
+
+async def ensure_bootstrap_credentials() -> dict:
+    """Guarantee that a first install has a working username/password login.
+
+    Idempotent and non-destructive:
+
+      * if ANY admin already has a username + password, nothing is touched;
+      * otherwise the first superadmin (or the first active admin, or a newly
+        created owner row) receives BOOTSTRAP_ADMIN_USERNAME /
+        BOOTSTRAP_ADMIN_PASSWORD. When no password is configured one is
+        generated and printed ONCE in the startup log;
+      * the credential is marked `must_change_password = true`, which the login
+        response surfaces and POST /api/admin/change-password clears.
+
+    Returns a dict describing what happened. Never raises.
+    """
+    out: dict = {"status": "noop", "username": None, "generated_password": None}
+    try:
+        if await _any_credential_exists():
+            out["status"] = "already_configured"
+            return out
+
+        username, password = bootstrap_credential_env()
+        generated = False
+        if not password:
+            password = generate_bootstrap_password()
+            generated = True
+        if len(password) < 6:
+            log.warning("[rbac] BOOTSTRAP_ADMIN_PASSWORD is shorter than 6 characters — ignoring it")
+            password = generate_bootstrap_password()
+            generated = True
+
+        admin_id = await _first_superadmin_id()
+        if admin_id is None:
+            admin_id = await _create_owner_admin()
+
+        # The username must be free (or already belong to this same row).
+        try:
+            holder = await fetch_val(
+                "SELECT id FROM fazle_admins WHERE LOWER(username)=$1 AND id <> $2",
+                username, admin_id,
+            )
+            if holder:
+                fallback = f"{username}{admin_id}"
+                log.warning(f"[rbac] username {username!r} is taken — using {fallback!r}")
+                username = fallback
+        except Exception:
+            pass
+
+        try:
+            await execute(
+                "UPDATE fazle_admins SET username=$1, password_hash=$2, "
+                "must_change_password=true, credential_set_at=NOW(), status='active' "
+                "WHERE id=$3",
+                username, hash_password(password), admin_id,
+            )
+        except Exception:
+            # pre-092 schema: no must_change_password / credential_set_at columns
+            await execute(
+                "UPDATE fazle_admins SET username=$1, password_hash=$2, status='active' "
+                "WHERE id=$3",
+                username, hash_password(password), admin_id,
+            )
+
+        # The first-boot account must actually be an owner: migration 093 seeds
+        # the role catalogue, and without the grant a fresh install could log in
+        # but not administer anything.
+        try:
+            granted = await fetch_val(
+                "SELECT 1 FROM fazle_admin_roles WHERE admin_id=$1 AND role_name='superadmin'",
+                admin_id,
+            )
+            if not granted and await fetch_val(
+                "SELECT 1 FROM fazle_roles WHERE name='superadmin'"
+            ):
+                await execute(
+                    "INSERT INTO fazle_admin_roles (admin_id, role_name, granted_by) "
+                    "VALUES ($1,'superadmin','bootstrap_credentials') "
+                    "ON CONFLICT DO NOTHING",
+                    admin_id,
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"[rbac] could not grant superadmin to {username!r}: {exc}")
+
+        out.update(
+            status="created",
+            admin_id=admin_id,
+            username=username,
+            generated_password=password if generated else None,
+        )
+        if generated:
+            log.warning(
+                "\n"
+                "==================================================================\n"
+                "  FIRST-BOOT ADMIN LOGIN (shown once)\n"
+                "    username : %s\n"
+                "    password : %s\n"
+                '  Log in via POST /api/admin/login {"mode":"password"}\n'
+                "  then change it: POST /api/admin/change-password\n"
+                "  (or set BOOTSTRAP_ADMIN_USERNAME/PASSWORD and delete the account's\n"
+                "   password before restarting to re-bootstrap deliberately)\n"
+                "==================================================================",
+                username, password,
+            )
+        else:
+            log.info(
+                "[rbac] bootstrap credential created for %s (password from BOOTSTRAP_ADMIN_PASSWORD)",
+                username,
+            )
+        return out
+    except Exception as exc:  # noqa: BLE001 — bootstrap must never block startup
+        log.warning(f"[rbac] bootstrap credential skipped: {exc}")
+        out["status"] = "error"
+        out["error"] = str(exc)[:200]
+        return out
+
+
+async def set_own_password(admin_id: int, new_password: str) -> None:
+    """Self-service password change; clears must_change_password."""
+    try:
+        await execute(
+            "UPDATE fazle_admins SET password_hash=$1, must_change_password=false, "
+            "credential_set_at=NOW() WHERE id=$2",
+            hash_password(new_password), int(admin_id),
+        )
+    except Exception:
+        await execute(
+            "UPDATE fazle_admins SET password_hash=$1 WHERE id=$2",
+            hash_password(new_password), int(admin_id),
+        )
+
+
 async def ensure_bootstrap_admins() -> int:
     """Create env ADMIN_NUMBERS entries as superadmin if missing."""
     created = 0
