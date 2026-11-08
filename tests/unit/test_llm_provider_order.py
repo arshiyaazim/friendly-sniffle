@@ -784,6 +784,21 @@ class TestScopeIsolation:
             "modules/bridge_poller/__init__.py",
             "modules/recruitment_recovery_sweep/__init__.py",
             "tests/unit/test_wbom_actor_attribution_stage_b.py",
+            # 2026-11-06 — first-boot admin credentials on a shared VPS
+            # (migration 092, change-password route, installer preflight).
+            # Same cumulative rule as above; the negative guards still apply.
+            "Dockerfile",
+            "app/static/dashboard.html",
+            "db/migrations/092_admin_bootstrap_credentials.sql",
+            "install.sh",
+            "modules/admin_transactions/__init__.py",
+            "modules/rbac/__init__.py",
+            "tests/unit/test_admin_bootstrap_credentials.py",
+            "db/migrate.py",
+            "scripts/apply_schema.py",
+            "tests/unit/test_apply_schema_plan.py",
+            "app/logging_setup.py",
+            "db/migrations/093_seed_rbac_roles.sql",
         }
         changed = self._changed_tracked_files()
         assert changed.issubset(expected_allowed), f"unexpected files changed: {changed - expected_allowed}"

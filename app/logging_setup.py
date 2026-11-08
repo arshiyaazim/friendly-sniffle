@@ -61,6 +61,13 @@ def setup_logging() -> None:
     fh = RotatingFileHandler(str(log_path), maxBytes=10 * 1024 * 1024, backupCount=5)
     fh.setFormatter(fmt)
     fh.setLevel(logging.INFO)
+    # The log can legitimately contain a one-time bootstrap password and other
+    # operator-only material, so keep it private to the service user: a 644 file
+    # in a 755 directory is readable by every account on a shared VPS.
+    try:
+        os.chmod(log_path, 0o600)
+    except OSError:
+        pass
 
     root = logging.getLogger()
     # Avoid double-add on reload

@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time as _time
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
@@ -27,7 +28,7 @@ from typing import Optional
 
 import re
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, field_validator
 
@@ -220,8 +221,49 @@ def _session_payload(actor: dict) -> dict:
     }
 
 
+# ── password-login throttle ──────────────────────────────────────────────────
+# The dashboard is reachable from the public URL, so an unthrottled password
+# endpoint is an offline-speed guessing oracle for one account. This is a small
+# in-process guard (no Redis dependency, lost on restart — acceptable: the
+# window is minutes, and a restart is an operator action, not an attacker one).
+LOGIN_MAX_FAILURES = 8
+LOGIN_WINDOW_S = 900
+_LOGIN_FAILURES: dict[str, list[float]] = {}
+
+
+def _throttle_key(username: str, request: Optional[Request]) -> str:
+    ip = ""
+    if request is not None:
+        forwarded = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+        ip = forwarded or (request.client.host if request.client else "")
+    return f"{ip}|{(username or '').strip().lower()}"
+
+
+def login_retry_after(key: str) -> int:
+    """Seconds the caller must wait (0 = allowed right now)."""
+    now = _time.monotonic()
+    hits = [t for t in _LOGIN_FAILURES.get(key, []) if now - t < LOGIN_WINDOW_S]
+    if hits:
+        _LOGIN_FAILURES[key] = hits
+    elif key in _LOGIN_FAILURES:
+        _LOGIN_FAILURES.pop(key, None)
+    if len(hits) >= LOGIN_MAX_FAILURES:
+        return max(1, int(LOGIN_WINDOW_S - (now - hits[0])))
+    return 0
+
+
+def record_login_failure(key: str) -> None:
+    if len(_LOGIN_FAILURES) > 10_000:      # never grow without bound
+        _LOGIN_FAILURES.clear()
+    _LOGIN_FAILURES.setdefault(key, []).append(_time.monotonic())
+
+
+def clear_login_failures(key: str) -> None:
+    _LOGIN_FAILURES.pop(key, None)
+
+
 @router.post("/login")
-async def admin_login(payload: dict):
+async def admin_login(payload: dict, request: Request = None):
     settings = get_settings()
     mode = str((payload or {}).get("mode") or "key").strip().lower()
 
@@ -254,13 +296,26 @@ async def admin_login(payload: dict):
     if not username or not password:
         raise HTTPException(status_code=400, detail="username and password required")
 
+    throttle_key = _throttle_key(username, request)
+    wait = login_retry_after(throttle_key)
+    if wait:
+        raise HTTPException(
+            status_code=429,
+            detail=f"too many failed login attempts — retry in {wait}s",
+            headers={"Retry-After": str(wait)},
+        )
+
     from modules import rbac
     admin = await rbac.get_admin_by_username(username)
-    if not admin or admin.get("status") != "active":
-        raise HTTPException(status_code=401, detail="Invalid username or password")
-    if not rbac.verify_password(password, admin.get("password_hash") or ""):
+    if not admin or admin.get("status") != "active" or not rbac.verify_password(
+        password, admin.get("password_hash") or ""
+    ):
+        record_login_failure(throttle_key)
+        log.warning("[admin_login] failed password login for %r from %s",
+                    username, throttle_key.split("|", 1)[0] or "unknown")
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
+    clear_login_failures(throttle_key)
     token = rbac.new_login_token()
     await execute(
         "UPDATE fazle_admins SET login_token_hash=$1, last_seen_at=NOW() WHERE id=$2",
@@ -272,6 +327,55 @@ async def admin_login(payload: dict):
         **_session_payload(actor),
         "credential": {"type": "token", "value": token},
         "auth_mode": "password",
+        # TRUE while the account still uses the install-time bootstrap password
+        # (see migration 092 / rbac.ensure_bootstrap_credentials()).
+        "must_change_password": bool(admin.get("must_change_password")),
+    }
+
+
+@router.post("/change-password")
+async def change_own_password(payload: dict, key: str = Depends(_require_api_key)):
+    """Self-service password change for the logged-in account.
+
+    Body: {"current_password": "...", "new_password": "..."}
+
+    The credential used for the call must be an ACCOUNT credential (a login
+    token from POST /api/admin/login or the account's API key). The legacy
+    server-wide INTERNAL_API_KEY has no account behind it and is refused —
+    rotate that one in the server environment instead.
+    """
+    from modules import rbac
+
+    body = payload or {}
+    current_password = str(body.get("current_password") or "")
+    new_password = str(body.get("new_password") or "")
+    if not current_password or not new_password:
+        raise HTTPException(400, "current_password and new_password are required")
+    if len(new_password) < 8:
+        raise HTTPException(400, "new_password must be at least 8 characters")
+    if new_password == current_password:
+        raise HTTPException(400, "new_password must differ from current_password")
+
+    admin = await rbac.get_admin_by_api_key(key)
+    if not admin or not admin.get("id"):
+        raise HTTPException(
+            400,
+            "this credential is the server API key, not an account — log in with "
+            "username/password first (POST /api/admin/login)",
+        )
+    if not admin.get("username"):
+        raise HTTPException(400, "this account has no username yet; set one via the admin console")
+
+    record = await rbac.get_admin_by_username(admin["username"])
+    if not record or not rbac.verify_password(current_password, record.get("password_hash") or ""):
+        raise HTTPException(401, "current password is incorrect")
+
+    await rbac.set_own_password(int(admin["id"]), new_password)
+    return {
+        "ok": True,
+        "username": admin.get("username"),
+        "must_change_password": False,
+        "note": "existing login tokens remain valid; reject them by logging in again",
     }
 
 

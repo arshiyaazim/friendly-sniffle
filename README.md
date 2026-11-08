@@ -17,13 +17,14 @@ providers.
 | Outbound | `modules.outbound` queue → bridge → WhatsApp |
 | UI | 12 served single-page apps + 2 design previews (no build step), Bengali + English |
 | Modules | 82 domain packages under `modules/` |
-| Migrations | 90 ordered SQL files under `db/migrations/` |
+| Migrations | 92 ordered SQL files under `db/migrations/`, plus two prerequisite schema sets (see [Local setup](#local-setup)) |
 
 ---
 
 ## Contents
 
-- [Requirements](#requirements) · [Local setup](#local-setup) · [Docker, the VPS installer and the restart gate](#docker-the-vps-installer-and-the-restart-gate) · [Tests](#tests)
+- [Requirements](#requirements) · [Local setup](#local-setup) · [Docker, the VPS installer and the restart gate](#docker-the-vps-installer-and-the-restart-gate)
+- [Installing alongside an existing app, bridge and database](#installing-alongside-an-existing-app-bridge-and-database) · [First login](#first-login-bootstrap-credentials) · [Tests](#tests)
 - [Folder structure](#folder-structure) · [Ports and services](#ports-and-services)
 - [Pages and URLs](#pages-and-urls) — every screen, its tabs, tables, buttons, forms and modals
 - [API surface](#api-surface)
@@ -74,20 +75,100 @@ empty string — uncomment only what you intend to set). Keep real credentials i
 an untracked `.env` or a secrets manager; never put production values in source
 control.
 
-Review pending migrations, then apply them to a new, empty PostgreSQL database:
+### Building the schema: three sets, one order
+
+`db/migrations/` is **not** sufficient on its own for a virgin database — it
+asserts tables that live in two older, standalone sets:
+
+| Order | Set | Creates / why it has to come first |
+|---|---|---|
+| 1 | `modules/fazle_payroll_engine/migrations/*.sql` (14 files) | `fpe_employees`, `fpe_cash_transactions`, `fpe_income_transactions`, `fpe_employee_ledger`. `db/migrations/030` indexes `fpe_employees` and `046` references it — without these the run stops at file 30. |
+| 2 | `migrations/escort_history_schema.sql`, `migrations/escort_roster_schema.sql` | `escort_order_groups`, `escort_order_lighters`, `escort_roster_entries`. `db/migrations/024` adds a foreign key onto `escort_order_groups`. |
+| 3 | `db/migrations/*.sql` (92 files) | Everything the application itself reads and writes. |
+
+`scripts/apply_schema.py` applies that order and records every file in the same
+`schema_migrations` table `db/migrate.py` uses, so the two runners never
+disagree about what is applied. The sets are not cleanly layered, so the builder
+works in dependency rounds — a file whose target table has not been created yet is
+deferred and retried instead of aborting the whole run:
 
 ```bash
-python db/migrate.py --dry-run                              # inventory only — no database needed
-DATABASE_URL=postgresql://… python db/migrate.py --dry-run  # what is actually pending
-DATABASE_URL=postgresql://… python db/migrate.py            # apply
+DATABASE_URL=postgresql://… python scripts/apply_schema.py --dry-run   # the plan
+DATABASE_URL=postgresql://… python scripts/apply_schema.py             # apply
+DATABASE_URL=postgresql://… python scripts/apply_schema.py --only db   # db/migrations only
 ```
 
-The dry run never applies SQL and does not validate it. With `DATABASE_URL` set
-it is read-only as well: it compares against `schema_migrations` without
-creating that table just to look. Without `DATABASE_URL` it prints the local
-inventory and says plainly that "pending" can only be answered by a database.
-Always rehearse a clean install against a disposable database before using a
-production one.
+Sets 1–2 contain **data statements** (salary normalisation, backfills), so the
+script applies them only while the database is still virgin — that is, when
+`fpe_employees` does not exist. On a database that already has the payroll
+schema they are skipped and only set 3 runs; `--prereqs always|never` overrides
+that decision explicitly. Each file runs in its own transaction and is recorded
+only after it succeeds, so a failure is resumable: fix the cause, re-run, and it
+continues from the file that failed.
+
+### Known gap: not every object can be built from the repository
+
+The tracked migrations are **incomplete for a virgin database**. Verified on
+2026-11-06 against PostgreSQL 16 by running the builder on an empty database:
+97 of 108 files apply, one is a deliberate no-op, and ten stop with the same
+missing objects — all of which exist only in the original production database
+(and, for the `wbom_*` pair, only in `tests/conftest.py`):
+
+| Missing object | Blocks |
+|---|---|
+| `wbom_candidates` | `003b`, `062`, `072`, `077` |
+| `wbom_candidate_conversations` | `062` |
+| `fazle_knowledge_base.value` (column) | `003`, `021` |
+| `fazle_knowledge_base.subcategory` (column) | `012` |
+| `fazle_knowledge_base.status` (column) | `003` |
+| `role fazle_ai_reader` (DB role) | `045`, `063` |
+| `fazle_payment_drafts.employee_phone` (pre-rename name) | `003c` |
+
+`086_k32_recruitment_reconciliation.sql` is a different case: it reconciles 66
+legacy FAQ rows and 9 governance rows that only exist in production, and raises a
+precondition error when they are absent. On a database built from scratch it is
+recorded as a no-op (named explicitly in `scripts/apply_schema.py`).
+
+Supplying all seven objects above (verified by doing exactly that on a scratch
+database) clears eight of the ten blocked files and leaves two, which are
+historical rather than missing — they describe a database state that no longer
+exists and are already applied in every real deployment:
+
+| Migration | Why it cannot apply to a freshly built database |
+|---|---|
+| `003_kb_schema_fix_and_recruitment.sql` | expects the original `fazle_knowledge_base` (`key`/`value`); `002` already creates `reply_text` |
+| `003c_schema_align.sql` | `RENAME COLUMN employee_phone → employee_mobile`, but `002` already names it `employee_mobile` |
+
+Both are listed in `scripts/apply_schema.py` as `HISTORICAL_ASSUMPTIONS`. Editing
+them was deliberately avoided: they are append-only history and already recorded
+as applied wherever this app runs.
+
+The builder reports exactly this and exits with code **3** ("schema incomplete"),
+and `install.sh` refuses to install on that half-built schema unless
+`ALLOW_INCOMPLETE_SCHEMA=1` is set. Two honest ways forward:
+
+1. **Point `DATABASE_URL` at an existing, complete database** (a production
+   clone, a restored dump, or the database of an earlier deployment of this
+   app). Then only genuinely pending files run — usually just `091`…`093`.
+2. **Restore a dump** into the new database instead of building it:
+   ```bash
+   pg_dump --no-owner --no-privileges "$PROD_URL" | psql "$NEW_URL"
+   ```
+   and create the two objects the dump may still lack (they are absent from the
+   tracked SQL entirely):
+   ```sql
+   CREATE ROLE fazle_ai_reader NOLOGIN;   -- if 045/063 still fail
+   ```
+
+Writing guessed `CREATE TABLE` statements for the four `wbom_*` objects would
+break the rule migration `029` was written under — schema recorded from a real
+`pg_dump`, not reconstructed — so this repository does not do that.
+
+`db/migrate.py` remains the runner for the core set alone (`--dry-run` works
+without a database). Its dry run never applies SQL and does not validate it;
+with `DATABASE_URL` set it is read-only, comparing against `schema_migrations`
+without creating that table just to look. Always rehearse a clean install
+against a disposable database before using a production one.
 
 Start the API locally:
 
@@ -111,17 +192,44 @@ docker build -t fazle-core .
 docker run --env-file .env -p 8200:8200 fazle-core
 ```
 
-`install.sh` is the VPS path. It creates the venv, installs `requirements.txt`,
-renders `fazle-core.service` for wherever the checkout actually lives
-(`@APP_DIR@` / `@RUN_USER@` are substituted, never shipped raw), installs and
-starts the unit, and then waits for the restart gate before declaring success:
+`install.sh` is the VPS path. It runs six steps and stops at the first real
+problem instead of leaving a half-configured host:
+
+1. venv + `requirements.txt`;
+2. `.env` — created from `.env.example` on first run with a generated
+   `INTERNAL_API_KEY` and `BOOTSTRAP_ADMIN_PASSWORD` (an existing `.env` is
+   never modified);
+3. preflight — `DATABASE_URL` present and reachable, `pg_trgm` available, and
+   `APP_PORT` still free (so it cannot steal a port from an app that is already
+   running);
+4. schema — `db/migrate.py` applies every pending file under `db/migrations`;
+5. unit — `fazle-core.service` is rendered for wherever the checkout actually
+   lives (`@APP_DIR@` / `@RUN_USER@` are substituted, never shipped raw),
+   installed and started;
+6. verification — the restart gate must pass before the script reports success.
 
 ```bash
-bash install.sh                       # APP_DIR / RUN_USER / PYTHON_BIN may be overridden
+bash install.sh --preflight           # checks only (may create .env on a first run)
+bash install.sh                       # full install
+# APP_DIR / RUN_USER / PYTHON_BIN / APP_PORT / DATABASE_URL / UNIT_NAME may be
+# overridden; SKIP_DB_CHECKS=1 skips step 3's database probe.
 ```
 
 The unit writes uvicorn's stderr to `logs/fazle-core.error.log` and reads
-`<repo>/.env` (plus the app's own `.env` loading). For a real deployment, follow
+`<repo>/.env` (plus the app's own `.env` loading). The image and `install.sh`
+both leave the schema to `db/migrate.py`: the app applies no migration at
+startup, so schema changes never happen behind an operator's back. (Startup only
+creates its own small runtime tables — `fazle_runtime_settings`, chat groups —
+with `CREATE TABLE IF NOT EXISTS`, which is why a missing migration surfaces as a
+query error rather than a silent half-upgrade.)
+
+```bash
+docker build -t fazle-core .
+docker run --rm --env-file .env fazle-core python db/migrate.py   # once
+docker run --env-file .env -p 8200:8200 fazle-core                # then the app
+```
+
+For a real deployment, follow
 [`MASTER_PRODUCTION_PLAN.md`](MASTER_PRODUCTION_PLAN.md) rather than the script
 alone.
 
@@ -142,6 +250,183 @@ Exit code 0 means ready. Crucially, a 503 whose only failing probes are `cpu`,
 reported but never treated as a deploy failure. Failing core probes (`db`,
 bridges, `outbound`, `scheduler`) do fail the gate, after a bounded settle
 window so a transient blip during startup is not fatal either.
+
+## Installing alongside an existing app, bridge and database
+
+This deployment is additive. Nothing here replaces the WhatsApp bridge, the
+application already connected to it, its database or its public URL — this app is
+a **second process**, a **second database on the same PostgreSQL server**, and a
+**second client of the same bridge**.
+
+### The bridge is shared, not taken over
+
+Do **not** stop `mcp-whatsapp-bridge` and do not re-pair the two numbers for this
+install. The app only talks to the bridge over HTTP (`BRIDGE*_URL`) and, when you
+opt into history import, reads the bridge's SQLite store **read-only**
+(`file:…?mode=ro`, see `modules/bridge_poller/__init__.py`). It never writes to
+the store, never logs a device out, and never sends a pairing request. There is
+no pairing screen in this app at all: pairing, unpairing and session health stay
+the bridge's job. What this app does notice is a bridge that reports a
+non-sending ("pairing") state — `modules/outbound._pairing_held` then refuses to
+enqueue outbound for that bridge instead of talking into a dead session.
+
+The other app keeps running throughout: separate unit (`fazle-core`), separate
+port, separate database, separate logs.
+
+### Ports
+
+Give this install its own port; the bridge and the existing app keep theirs.
+
+| Service | Default here | Where it is set |
+|---|---|---|
+| This app | `127.0.0.1:8200` | `APP_PORT` (`run.py`); container binds `0.0.0.0:8200` |
+| Existing app | unchanged | its own config |
+| WhatsApp bridge | `BRIDGE1_URL` / `BRIDGE2_URL` / `BRIDGE3_URL` (defaults `:8082`, `:8081`, `:8083`) | `.env` — point at the **running** bridge |
+| Ollama (optional) | `http://localhost:11434` | `OLLAMA_URL` |
+| PostgreSQL | `5432` (shared cluster) | inside `DATABASE_URL` |
+| Redis | not required at startup | `REDIS_URL` (test stack only today) |
+
+`bash install.sh --preflight` fails with the owning process if `APP_PORT` is
+already taken, so a re-install cannot silently fight the other app for a port.
+If `8200` is busy, set e.g. `APP_PORT=8210` in `.env`. Users never reach that
+port directly: the reverse proxy that already serves the existing app's domain
+gets one more `location`/server block pointing at `127.0.0.1:$APP_PORT`, on a
+different hostname or path — that is the "URL" this install owns.
+
+### Database
+
+Use a **new database** on the existing PostgreSQL server; do not point this app
+at the other app's database.
+
+```sql
+CREATE ROLE fazle LOGIN PASSWORD 'choose-a-real-password';
+CREATE DATABASE fazle_core OWNER fazle;
+\c fazle_core
+CREATE EXTENSION IF NOT EXISTS pg_trgm;   -- needs superuser on some clusters
+```
+
+```bash
+# .env
+DATABASE_URL=postgresql://fazle:choose-a-real-password@127.0.0.1:5432/fazle_core
+```
+
+Two situations, two answers:
+
+- **The database already exists** (a previous deployment of this app, a clone, or
+  a restore): point `DATABASE_URL` at it. `scripts/apply_schema.py` — run by
+  `install.sh` — sees `fpe_employees` and applies only the genuinely pending
+  `db/migrations` files, almost always just `091`…`093`.
+- **A brand-new database**: the builder applies 96 of 108 files and then stops
+  with exit code 3, because six objects exist only in the original production
+  database. See [Known gap](#known-gap-not-every-object-can-be-built-from-the-repository);
+  the practical route is a `pg_dump` restore, not a from-scratch build.
+
+Three migrations deserve a look before the first run on a shared server:
+
+- `003b` and `042` contain `DROP TABLE IF EXISTS` on **this app's own** tables
+  (fresh database ⇒ no-op);
+- `029` runs `CREATE EXTENSION pg_trgm` and adds constraints inside guarded
+  blocks — if `pg_trgm` cannot be created, run the `CREATE EXTENSION` above as a
+  superuser first;
+- the prerequisite sets are only applied to a virgin database because they
+  contain data statements (`--prereqs never` skips them outright).
+
+### Foreign keys and dependencies
+
+There are **no cross-database foreign keys and no shared tables** with the other
+app or the bridge: every `REFERENCES` in `db/migrations` points at a table in the
+same database, created by these migrations. The only external objects are the
+`pg_trgm` extension (optional index acceleration) and the triggers created by
+`023`/`029` inside this database. Nothing in this app expects to own the bridge's
+SQLite files or the other app's tables.
+
+At startup the app requires only PostgreSQL. The bridge, Ollama and the hosted AI
+providers are contacted lazily; a bridge that is down at boot degrades `/health`
+for bridges but does not block the API.
+
+### Go-live checklist
+
+```bash
+# 1. schema + first-boot credential (creates .env if missing, applies migrations)
+bash install.sh --preflight           # env / database / pg_trgm / port free?
+bash install.sh                       # install, migrate, start, verify
+
+# 2. log in at http://127.0.0.1:8200/ with the username/password form,
+#    then change the bootstrap password when the dashboard asks for it.
+
+# 3. decide what this instance owns (both are separate switches)
+#    SCHEDULER_ENABLED  — periodic jobs; set false if the other app runs yours
+#    OUTBOUND_ENABLED   — sending through the bridge; false until tested
+
+# 4. point the bridge settings at the running bridge, then restart
+sudo systemctl restart fazle-core
+```
+
+## First login (bootstrap credentials)
+
+A fresh database has no accounts, so the app creates one on the first start:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BOOTSTRAP_ADMIN_USERNAME` | `admin` | Username for the first account |
+| `BOOTSTRAP_ADMIN_PASSWORD` | *(empty)* | Password; empty ⇒ one is generated and printed **once** in the startup log |
+| `BOOTSTRAP_ADMIN_PHONE` | `8800000000000` | Phone for the owner row when `ADMIN_NUMBERS` is empty |
+| `BOOTSTRAP_ADMIN_CREDENTIALS` | `true` | `false` disables the whole step |
+
+Migration `093` seeds the RBAC role catalogue (`viewer` 10, `office_assistant` 20,
+`operator` 30, `accountant` 50, `admin` 70, `superadmin` 100), and the bootstrap
+grants `superadmin` to the account it creates — otherwise a fresh install could
+log in but not administer anything. Existing role levels are never rewritten.
+
+The rule is *create once, never overwrite*: if **any** admin already has a
+username and password, `rbac.ensure_bootstrap_credentials()` returns
+`already_configured` and changes nothing — a restart cannot reset a password an
+owner has already chosen. Once the owner has changed it, the value still sitting
+in `.env` is inert; delete the line or leave it, either way it is not a backdoor. The bootstrap row is also marked
+`must_change_password = true`, so the default is a one-time door:
+
+```bash
+# what the dashboard does behind its username/password form
+curl -sX POST http://127.0.0.1:8200/api/admin/login \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"password","username":"admin","password":"<from .env or the log>"}'
+# → {"credential":{"type":"token","value":"fk_…"},"must_change_password":true, …}
+
+curl -sX POST http://127.0.0.1:8200/api/admin/change-password \
+  -H "X-Internal-Key: fk_…" -H 'Content-Type: application/json' \
+  -d '{"current_password":"<old>","new_password":"<new, min 8 chars>"}'
+# → {"ok":true,"must_change_password":false}
+```
+
+The dashboard (`/`) shows the username/password form first and switches to a
+"change this password" pane while `must_change_password` is true. The flag is
+advisory, honestly stated: it is reported by the login response and the UI nags
+until it is cleared, but no other endpoint is blocked by it — an operator who
+automates against `INTERNAL_API_KEY` is never locked out by a pending password
+change. Treat "default password still active" as an operational task, not as an
+enforced policy. Both
+migrations and the bootstrap are additive: an installation that already has
+accounts keeps working untouched (migration `092` only adds columns and a
+case-insensitive unique index on `username`).
+
+### What the login does not do
+
+There is **no second factor** in this codebase — no TOTP, no SMS challenge. The
+password gate is one factor, plus optional 8-failure/15-minute throttling per
+username+IP (`POST /api/admin/login` answers `429` with `Retry-After`). On a
+public host, put the dashboard behind the reverse proxy with TLS and, if it must
+be internet-facing, an IP allowlist or basic auth; the app's own loopback bind
+(`127.0.0.1:8200`) already assumes a proxy in front of it.
+
+### `INTERNAL_API_KEY` is not a login
+
+`INTERNAL_API_KEY` grants full owner access to every route and is meant for
+server-to-server calls, not for people. The app refuses to be quiet about it: an
+empty or obviously weak value produces a `[security]` warning at startup, and
+`POST /api/admin/change-password` rejects it outright because no account stands
+behind it. Generate it with `openssl rand -hex 32` (the installer does this for
+you), keep it in `.env` (mode `600`), and hand operators usernames/passwords
+instead. Rotating it logs nobody out — it just stops being valid itself.
 
 ## Tests
 
@@ -184,9 +469,9 @@ friendly-sniffle/
 ├── shared/                      cross-cutting helpers: auth, drafts, phone, events, queue arbiter
 ├── db/
 │   ├── migrate.py               migration runner (see Local setup)
-│   └── migrations/              90 ordered .sql files — the only schema authority
-├── migrations/                  older standalone SQL, NOT run by db/migrate.py
-├── scripts/                     restart_gate_readiness.py, secret_scan.sh
+│   └── migrations/              92 ordered .sql files — the final schema set
+├── migrations/                  standalone schema sets (escort history/roster) — prerequisites, see apply_schema.py
+├── scripts/                     restart_gate_readiness.py, apply_schema.py, secret_scan.sh
 ├── tools/                       one-off repair CLIs (e.g. repair_fpe_transactions.py)
 ├── resources/                   CSV templates / seed material
 ├── tests/                       unit · integration · db · workflows · resilience · e2e · load
@@ -262,7 +547,10 @@ browser) and calls the JSON API with it.
 | **💬 Chat Lab** | Model picker, toggles for app context / DB read / internet, chat thread with **Send** / **Clear** |
 | **AI & Phone Settings** | AI provider settings; `WhatsApp Identity Numbers` — save accountant number, escort client numbers |
 
-Login gate: **Login** with the internal API key; **Logout** clears it.
+Login gate: username + password (the first-boot account, or any admin created
+with one) **or** a raw internal API key / `fk_…` token. While the account still
+uses the bootstrap password the same box shows a **change password** pane.
+**Logout** clears the stored credential from `localStorage`.
 
 ### `/payroll` — HR & Admin (15 tabs)
 
@@ -369,7 +657,7 @@ prefix:
 | Prefix | Purpose |
 |---|---|
 | `/api/fpe/*` (51 endpoints) | Payroll engine: `employees`, `transactions`, `cash`, `income`, `operator`, `unmatched`, `review`, `sync`, `normalization`, `staging-payments`, `ledger`, `stats`, `admin` |
-| `/api/admin/*`, `/admin/users/*` | Admin employees/transactions/users, login, knowledge upload |
+| `/api/admin/*`, `/admin/users/*` | Admin employees/transactions/users, `login` (key or username/password), `change-password`, knowledge upload |
 | `/admin/attendance/*`, `/admin/payroll/*` | Attendance CRUD, eligibility preview, dry run, reconciliation |
 | `/api/escort-roster/*` | Roster summary/active/export, config, escort clients, accountant phone, sync-all |
 | `/api/escort/*` | Escort program and slip review |
@@ -954,12 +1242,17 @@ API keys, bridge addresses, and contact identifiers. The app should remain in a
 non-sending mode until bridge configuration, authorization, and message-routing
 tests have passed.
 
-Schema changes are applied only through `db/migrate.py`; the newest file is
-[`091_outbound_provenance_and_history_backfill.sql`](db/migrations/091_outbound_provenance_and_history_backfill.sql),
-which adds the outbound provenance columns and the history-import state table
-described above. The writer is schema-tolerant: a database that has not run 091
-still accepts every message (the unknown columns are dropped), it just cannot
-record provenance yet.
+Schema changes are applied only through `db/migrate.py` (or `scripts/apply_schema.py`
+for a full build); 92 files in `db/migrations` are applied in filename order. The two newest are
+[`091_outbound_provenance_and_history_backfill.sql`](db/migrations/091_outbound_provenance_and_history_backfill.sql)
+(outbound provenance columns + history-import state table, described above) and
+[`092_admin_bootstrap_credentials.sql`](db/migrations/092_admin_bootstrap_credentials.sql)
+(`must_change_password`, `credential_set_at`, and a case-insensitive unique index
+on `fazle_admins.username`) and
+[`093_seed_rbac_roles.sql`](db/migrations/093_seed_rbac_roles.sql) (the six RBAC
+role rows a non-production database never had). Both writers are schema-tolerant: a database that
+has not run them still accepts every message, and the bootstrap falls back to the
+pre-092 column set instead of failing startup.
 
 Operational switches introduced with that migration:
 
@@ -970,6 +1263,11 @@ Operational switches introduced with that migration:
 | `BRIDGE_HISTORY_BACKFILL_INCLUDE_OUTBOUND` | `true` | Also import `is_from_me = 1` history |
 | `BRIDGE_OUTBOUND_CAPTURE_ENABLED` | `true` | Persist messages typed on the phone itself |
 | `BRIDGE_OUTBOUND_POLL_S` | `10` | How often that capture loop reads the store |
+| `BOOTSTRAP_ADMIN_USERNAME` | `admin` | Username created on the first start (see [First login](#first-login-bootstrap-credentials)) |
+| `BOOTSTRAP_ADMIN_PASSWORD` | *(generated)* | First password; empty ⇒ generated and logged once. Never overwrites an existing one |
+| `BOOTSTRAP_ADMIN_CREDENTIALS` | `true` | `false` disables the first-boot account |
+| `SCHEDULER_ENABLED` | `true` | Periodic jobs — turn off when another app on the host owns them |
+| `OUTBOUND_ENABLED` | `false` | Actual sending through the bridge |
 
 For the staged clean-install, migration, bridge, AI-provider, verification, and
 rollback checklist, see [`MASTER_PRODUCTION_PLAN.md`](MASTER_PRODUCTION_PLAN.md).

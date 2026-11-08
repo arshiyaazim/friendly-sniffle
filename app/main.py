@@ -310,6 +310,33 @@ async def lifespan(app: FastAPI):
         log.info(f"[rbac] bootstrap complete (created={n})")
     except Exception as e:
         log.warning(f"[rbac] bootstrap failed: {e}")
+    # First-boot credentials: guarantee that a brand-new install can log in with
+    # username/password (BOOTSTRAP_ADMIN_USERNAME / BOOTSTRAP_ADMIN_PASSWORD, or
+    # one generated and printed once in this log). Never touches an account that
+    # already has a password. See migration 092 + rbac.ensure_bootstrap_credentials.
+    if (os.getenv("BOOTSTRAP_ADMIN_CREDENTIALS", "true").strip().lower() not in ("0", "false", "no", "off")):
+        try:
+            from modules import rbac
+            cred = await rbac.ensure_bootstrap_credentials()
+            log.info(f"[rbac] credential bootstrap: {cred.get('status')}")
+        except Exception as e:
+            log.warning(f"[rbac] credential bootstrap failed: {e}")
+    else:
+        log.info("[rbac] credential bootstrap disabled (BOOTSTRAP_ADMIN_CREDENTIALS=off)")
+    # Loud warning when the server-wide key is missing or obviously weak: it
+    # short-circuits RBAC as owner, so on a shared VPS it must be a real secret.
+    _ik = (settings.internal_api_key or "").strip()
+    if not _ik:
+        log.warning(
+            "[security] INTERNAL_API_KEY is EMPTY — key-mode login is disabled, but any "
+            "deployment that re-enables it would be unauthenticated. Use username/password."
+        )
+    elif len(_ik) < 24 or _ik.lower() in ("changeme", "change-me", "secret", "password", "test", "admin"):
+        log.warning(
+            "[security] INTERNAL_API_KEY looks weak (%d chars / default value). It grants "
+            "full owner access to every route. Replace it: openssl rand -hex 32",
+            len(_ik),
+        )
     # WhatsApp Chat UI — ensure runtime settings + groups tables exist
     try:
         await ensure_wa_chat_tables()

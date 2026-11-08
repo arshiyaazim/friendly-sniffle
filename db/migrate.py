@@ -6,6 +6,11 @@ Usage:
     DATABASE_URL=... python db/migrate.py --dry-run   # list what is actually pending
     DATABASE_URL=... python db/migrate.py       # apply pending migrations
 
+This runner covers `db/migrations/` ONLY. A virgin database also needs the
+payroll-engine and escort schema sets that this set depends on — use
+`python scripts/apply_schema.py` for a complete build (it applies the same
+`db/migrations` files, recorded under the same names, in the right order).
+
 `--dry-run` without DATABASE_URL prints the local migration inventory and exits
 without touching a database. With DATABASE_URL set it compares against
 schema_migrations and lists the genuinely pending files — still without

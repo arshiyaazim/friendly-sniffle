@@ -62,9 +62,21 @@ small.dim{color:var(--muted);font-size:11px}
 <div id="loginOverlay">
   <div id="loginBox">
     <h2>🔐 Fazle Core</h2>
-    <p class="muted" style="margin:0 0 12px">API key দিন (X-Internal-Key). ব্রাউজারে localStorage-এ সংরক্ষিত হবে।</p>
-    <input id="keyInput" type="password" placeholder="INTERNAL_API_KEY বা fk_..." style="width:100%;margin-bottom:10px" autofocus>
-    <button class="btn" onclick="doLogin()" style="width:100%">Login</button>
+    <div id="pwPane">
+      <p class="muted" style="margin:0 0 12px">ইউজারনেম ও পাসওয়ার্ড দিয়ে লগইন করুন।</p>
+      <input id="userInput" type="text" placeholder="username" autocomplete="username" style="width:100%;margin-bottom:8px" autofocus>
+      <input id="passInput" type="password" placeholder="password" autocomplete="current-password" style="width:100%;margin-bottom:10px">
+      <button class="btn" onclick="doPasswordLogin()" style="width:100%">Login</button>
+      <p class="muted" style="margin:12px 0 6px;font-size:12px">অথবা সরাসরি API key / fk_ টোকেন ব্যবহার করুন:</p>
+    </div>
+    <input id="keyInput" type="password" placeholder="INTERNAL_API_KEY বা fk_..." style="width:100%;margin-bottom:8px">
+    <button class="btn sm" onclick="doLogin()" style="width:100%">API key দিয়ে লগইন</button>
+    <div id="chgPane" style="display:none;margin-top:14px;border-top:1px solid #333;padding-top:12px">
+      <p style="margin:0 0 8px;color:var(--err);font-size:12px">⚠️ এটি ডিফল্ট পাসওয়ার্ড — ব্যবহারের আগে বদলে নিন (কমপক্ষে ৮ অক্ষর)।</p>
+      <input id="chgNew" type="password" placeholder="নতুন পাসওয়ার্ড" autocomplete="new-password" style="width:100%;margin-bottom:8px">
+      <input id="chgNew2" type="password" placeholder="নতুন পাসওয়ার্ড আবার" autocomplete="new-password" style="width:100%;margin-bottom:8px">
+      <button class="btn" onclick="doChangePassword()" style="width:100%">পাসওয়ার্ড বদলান</button>
+    </div>
     <p id="loginErr" class="muted" style="margin-top:8px;color:var(--err);min-height:14px"></p>
   </div>
 </div>
@@ -423,6 +435,67 @@ function logout(){ localStorage.removeItem(KEY_STORAGE); apiKey=""; showLogin();
 function toast(msg, ms=2500){
   const t = document.getElementById("toast"); t.textContent = msg; t.style.display="block";
   setTimeout(()=>t.style.display="none", ms);
+}
+let pendingCredential = null;   // {username, currentPassword} while must_change_password is true
+let enteredUsername = "";
+async function doPasswordLogin(){
+  const u = document.getElementById("userInput").value.trim();
+  const p = document.getElementById("passInput").value;
+  const errEl = document.getElementById("loginErr");
+  errEl.textContent = "";
+  if(!u || !p){ errEl.textContent = "ইউজারনেম ও পাসওয়ার্ড দুটোই দিন"; return; }
+  try {
+    const r = await fetch("/api/admin/login", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({mode: "password", username: u, password: p}),
+    });
+    if(!r.ok){
+      let msg = "HTTP " + r.status;
+      try { const j = await r.json(); if(j && j.detail) msg = j.detail; } catch(_) {}
+      errEl.textContent = "লগইন ব্যর্থ: " + msg; return;
+    }
+    const d = await r.json();
+    const token = (d.credential && d.credential.value) || "";
+    if(!token){ errEl.textContent = "সার্ভার টোকেন দেয়নি"; return; }
+    apiKey = token; localStorage.setItem(KEY_STORAGE, token);
+    enteredUsername = u;
+    document.getElementById("passInput").value = "";
+    if(d.must_change_password){
+      pendingCredential = {currentPassword: p};
+      document.getElementById("pwPane").style.display = "none";
+      document.getElementById("chgPane").style.display = "block";
+      document.getElementById("chgNew").focus();
+      errEl.textContent = "";
+      return;
+    }
+    pendingCredential = null;
+    hideLogin(); refreshAll();
+  } catch(e){ errEl.textContent = String(e); }
+}
+async function doChangePassword(){
+  const n1 = document.getElementById("chgNew").value;
+  const n2 = document.getElementById("chgNew2").value;
+  const errEl = document.getElementById("loginErr");
+  if(n1.length < 8){ errEl.textContent = "নতুন পাসওয়ার্ড কমপক্ষে ৮ অক্ষর"; return; }
+  if(n1 !== n2){ errEl.textContent = "দুটি পাসওয়ার্ড মিলছে না"; return; }
+  try {
+    const r = await fetch("/api/admin/change-password", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-Internal-Key": apiKey},
+      body: JSON.stringify({current_password: (pendingCredential||{}).currentPassword || "", new_password: n1}),
+    });
+    if(!r.ok){
+      let msg = "HTTP " + r.status;
+      try { const j = await r.json(); if(j && j.detail) msg = j.detail; } catch(_) {}
+      errEl.textContent = "পাসওয়ার্ড বদলানো যায়নি: " + msg; return;
+    }
+    pendingCredential = null;
+    document.getElementById("chgPane").style.display = "none";
+    document.getElementById("pwPane").style.display = "block";
+    document.getElementById("loginErr").textContent = "";
+    toast("পাসওয়ার্ড বদলানো হয়েছে");
+    hideLogin(); refreshAll();
+  } catch(e){ errEl.textContent = String(e); }
 }
 async function doLogin(){
   const k = document.getElementById("keyInput").value.trim();
@@ -1241,6 +1314,9 @@ async function deleteRelation(phone){
 
 if(apiKey){ hideLogin(); refreshAll(); } else { showLogin(); }
 document.getElementById("keyInput").addEventListener("keydown", e=>{ if(e.key==="Enter") doLogin(); });
+document.getElementById("passInput").addEventListener("keydown", e=>{ if(e.key==="Enter") doPasswordLogin(); });
+document.getElementById("userInput").addEventListener("keydown", e=>{ if(e.key==="Enter") document.getElementById("passInput").focus(); });
+document.getElementById("chgNew2").addEventListener("keydown", e=>{ if(e.key==="Enter") doChangePassword(); });
 </script>
 </body>
 </html>
