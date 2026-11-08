@@ -77,12 +77,37 @@ docker build -t fazle-core .
 docker run --env-file .env -p 8200:8200 fazle-core
 ```
 
-`install.sh` is the VPS path: it creates a venv, installs `requirements.txt`,
-and registers a systemd unit. It assumes the checkout sits at a fixed path and
-that a `fazle-core.service` unit file exists next to it — verify both before
-running it. For a real deployment, follow
-[`MASTER_PRODUCTION_PLAN.md`](MASTER_PRODUCTION_PLAN.md) instead of the script
+`install.sh` is the VPS path. It creates the venv, installs `requirements.txt`,
+renders `fazle-core.service` for wherever the checkout actually lives
+(`@APP_DIR@` / `@RUN_USER@` are substituted, never shipped raw), installs and
+starts the unit, and then waits for the restart gate before declaring success:
+
+```bash
+bash install.sh                       # APP_DIR / RUN_USER / PYTHON_BIN may be overridden
+```
+
+The unit writes uvicorn's stderr to `logs/fazle-core.error.log` and reads
+`<repo>/.env` (plus the app's own `.env` loading). For a real deployment, follow
+[`MASTER_PRODUCTION_PLAN.md`](MASTER_PRODUCTION_PLAN.md) rather than the script
 alone.
+
+### Restart gate
+
+`systemctl restart` returning is not proof of a working deploy. The gate checks
+the process state, the restart counter (crash-loop detection), the stderr log
+for a completed startup or an unhandled traceback, and `/health`:
+
+```bash
+BEFORE=$(systemctl show -p NRestarts --value fazle-core)
+sudo systemctl restart fazle-core
+python -m scripts.restart_gate_readiness --restarts-before "$BEFORE"
+```
+
+Exit code 0 means ready. Crucially, a 503 whose only failing probes are `cpu`,
+`disk`, or `mem` counts as **ready** — those are host-level (`ambient`) signals,
+reported but never treated as a deploy failure. Failing core probes (`db`,
+bridges, `outbound`, `scheduler`) do fail the gate, after a bounded settle
+window so a transient blip during startup is not fatal either.
 
 ## Tests
 

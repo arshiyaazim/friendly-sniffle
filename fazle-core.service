@@ -1,0 +1,47 @@
+[Unit]
+# TEMPLATE — do not copy this file to /etc/systemd/system by hand.
+# install.sh substitutes the placeholder values and installs the result:
+#     bash install.sh
+# or render it yourself:
+#     sed -e "s|@APP_DIR@|/srv/fazle-core|g" -e "s|@RUN_USER@|fazle|g" \
+#         fazle-core.service > /tmp/fazle-core.service
+Description=Fazle Core — WhatsApp operations backend
+Documentation=file://@APP_DIR@/README.md
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@RUN_USER@
+Group=@RUN_USER@
+WorkingDirectory=@APP_DIR@
+
+# app/config.py reads <repo>/.env itself; EnvironmentFile additionally exposes
+# the settings that modules read with os.getenv() directly (SCHEDULER_ENABLED,
+# OUTBOUND_ENABLED, BACKUP_KEEP_DAILY, …). The leading "-" makes a missing
+# .env a warning rather than a failed start.
+EnvironmentFile=-@APP_DIR@/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=@APP_DIR@
+
+# run.py binds 127.0.0.1:APP_PORT (default 8200) and honours DEBUG/LOG_LEVEL.
+ExecStartPre=-/bin/mkdir -p @APP_DIR@/logs
+ExecStart=@APP_DIR@/venv/bin/python @APP_DIR@/run.py
+
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillMode=mixed
+
+# scripts/restart_gate_readiness.py scans the error log for
+# "Application startup complete." and for the traceback of a failed boot —
+# uvicorn writes both to stderr, so they must land in a file the gate can read.
+StandardOutput=append:@APP_DIR@/logs/fazle-core.stdout.log
+StandardError=append:@APP_DIR@/logs/fazle-core.error.log
+
+# Deliberately modest hardening: the service owns logs/, backups/, resources/.
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
