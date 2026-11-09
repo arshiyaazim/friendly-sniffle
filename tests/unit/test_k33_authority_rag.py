@@ -8,7 +8,17 @@ import pytest
 
 from modules.recruitment_authority import candidate_evidence_safe, load_recruitment_authority
 
-pytestmark = pytest.mark.unit
+from tests.support.private_data import requires_private
+
+_NEEDS_REGISTER = requires_private("knowledge_base/00_governance/recruitment_fact_authority.json")
+
+pytestmark = [
+    pytest.mark.unit,
+    # The fact register is private operational data (knowledge_base/ is
+    # git-ignored, like resources/ops/). Without it every fact is
+    # 'unverified', so the module is unanswerable rather than failing.
+    _NEEDS_REGISTER,
+]
 
 
 def _value(key: str) -> str:

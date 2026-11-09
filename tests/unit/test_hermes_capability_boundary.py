@@ -26,6 +26,8 @@ database, mocks, and source inspection only.
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import os
+
 import pytest
 
 from modules.hermes_tasks import (
@@ -37,11 +39,25 @@ from modules.hermes_tasks import (
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.db]
 
-_PLUGIN_DIR = Path("/home/azim/.hermes/plugins/task_action_policy")
-_MCP_ACTION_POLICY = Path("/home/azim/fazle-mcp/action_policy.py")
+# These integrity checks compare files that live in a *separate* installation:
+# the fazle-mcp checkout and the Hermes plugin directory. They are the right
+# tests on the machine that hosts Hermes, and meaningless (not failing, just
+# unanswerable) anywhere else — so the location is configurable and the checks
+# skip with a reason when the installation is not there. A skip is visible in
+# the run summary; a fabricated pass would not be.
+_HERMES_HOME = Path(os.environ.get("HERMES_HOME", "/home/azim/.hermes"))
+_MCP_REPO = Path(os.environ.get("FAZLE_MCP_REPO", "/home/azim/fazle-mcp"))
+_PLUGIN_DIR = _HERMES_HOME / "plugins" / "task_action_policy"
+_MCP_ACTION_POLICY = _MCP_REPO / "action_policy.py"
 _PLUGIN_ACTION_POLICY = _PLUGIN_DIR / "action_policy.py"
 _PLUGIN_INIT = _PLUGIN_DIR / "__init__.py"
 
+
+_EXTERNAL_INSTALL = pytest.mark.skipif(
+    not (_PLUGIN_DIR.is_dir() and _MCP_REPO.is_dir()),
+    reason="external Hermes/fazle-mcp installation not present — set HERMES_HOME and "
+           "FAZLE_MCP_REPO to run these cross-repository integrity checks",
+)
 
 def _load_policy_module():
     """Load the shared action_policy by path.
@@ -260,6 +276,7 @@ async def test_authorization_state_route_is_read_only_and_registered():
 
 
 # ── 3. action_policy.py copy-sync drift guard ────────────────────────────────
+@_EXTERNAL_INSTALL
 def test_action_policy_copies_are_byte_identical():
     """action_policy.py's own docstring requires the fazle-mcp and Hermes
     plugin copies to be byte-identical. Nothing enforced that, so a fix
@@ -273,6 +290,7 @@ def test_action_policy_copies_are_byte_identical():
     )
 
 
+@_EXTERNAL_INSTALL
 def test_redirection_fix_present_in_both_copies():
     """The redirection classification fix must exist in whichever copy is
     loaded; assert on the shared source so it cannot be dropped from one."""
@@ -287,6 +305,7 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+@_EXTERNAL_INSTALL
 def test_deployed_classifier_is_byte_identical_to_the_canonical_repo_copy():
     """Security-candidate integrity: the Owner must be able to name exactly
     which bytes a restart activates.
@@ -307,6 +326,7 @@ def test_deployed_classifier_is_byte_identical_to_the_canonical_repo_copy():
     )
 
 
+@_EXTERNAL_INSTALL
 def test_canonical_classifier_source_is_actually_tracked_in_a_repository():
     """A 'canonical source' that is not tracked is not a source of truth.
     Assert the canonical copy is committed in a git repository, so a restart
@@ -327,6 +347,7 @@ def test_canonical_classifier_source_is_actually_tracked_in_a_repository():
 CANONICAL_PLUGIN_REPO = "/home/azim/fazle-mcp"
 
 
+@_EXTERNAL_INSTALL
 def test_enforcement_plugin_has_one_tracked_canonical_source():
     """SECURITY_POLICY_INTEGRITY_BLOCKER: CLOSED 2026-09-29.
 
@@ -390,6 +411,7 @@ def test_enforcement_plugin_has_one_tracked_canonical_source():
     )
 
 
+@_EXTERNAL_INSTALL
 def test_plugin_is_loaded_from_the_user_plugin_directory():
     """Pins the deployment location so a moved plugin cannot silently stop
     being loaded while its files still look correct on disk."""
@@ -405,6 +427,7 @@ def test_plugin_is_loaded_from_the_user_plugin_directory():
 
 
 # ── 4. The plugin's own enforcement wiring (source-level, no import needed) ───
+@_EXTERNAL_INSTALL
 def test_plugin_does_not_use_the_non_expiry_checking_listing_as_a_decision():
     """Regression guard for the exact bug: /api/actions?status=approved is a
     discovery helper that does not filter expiry. It may still be used for
@@ -420,6 +443,7 @@ def test_plugin_does_not_use_the_non_expiry_checking_listing_as_a_decision():
             )
 
 
+@_EXTERNAL_INSTALL
 def test_plugin_gates_workspace_mutation_and_execute_code():
     source = _PLUGIN_INIT.read_text(encoding="utf-8")
     assert "_check_workspace_mutation_command" in source
@@ -428,12 +452,14 @@ def test_plugin_gates_workspace_mutation_and_execute_code():
     assert '"production_write"' in source
 
 
+@_EXTERNAL_INSTALL
 def test_workspace_mutation_uses_existing_file_mutation_vocabulary():
     """The terminal path must reuse the classifier's existing category ->
     action_type mapping rather than hardcoding a new name."""
     assert _load_policy_module().action_type_for("WORKSPACE_MUTATION") == "file_mutation"
 
 
+@_EXTERNAL_INSTALL
 def test_requires_gated_approval_now_includes_workspace_mutation():
     requires_gated_approval = _load_policy_module().requires_gated_approval
     assert requires_gated_approval("WORKSPACE_MUTATION") is True
@@ -442,6 +468,7 @@ def test_requires_gated_approval_now_includes_workspace_mutation():
     assert requires_gated_approval("DESTRUCTIVE") is False
 
 
+@_EXTERNAL_INSTALL
 def test_classifier_categories_unchanged_in_shape():
     """The taxonomy itself must not grow a new category for this audit --
     CODE_EXECUTION reuses the existing generic mutation bucket."""
@@ -451,6 +478,7 @@ def test_classifier_categories_unchanged_in_shape():
     }
 
 
+@_EXTERNAL_INSTALL
 def test_shell_redirection_is_never_classified_read_only():
     """The boundary the audit found broken: the classifier looked only at
     command names, so `cat /etc/passwd > /tmp/leak` was READ_ONLY."""
@@ -469,6 +497,7 @@ def test_shell_redirection_is_never_classified_read_only():
 
 
 # ── 5. fazle-core's own MCP write path is neither weakened nor double-gated ──
+@_EXTERNAL_INSTALL
 def test_send_whatsapp_gate_still_requires_run_mode_and_confirm():
     """The relay force-grants the RUN *toolset*, but fazle-mcp's send gate
     reads the persisted mode FILE, and confirm is a separate required
@@ -480,6 +509,7 @@ def test_send_whatsapp_gate_still_requires_run_mode_and_confirm():
     assert "if not confirm:" in body
 
 
+@_EXTERNAL_INSTALL
 def test_plugin_does_not_gate_mcp_tools():
     """fazle-core's MCP tools keep their own canonical authorization; the
     plugin must not double-gate them (which would be a second framework)."""
@@ -487,6 +517,7 @@ def test_plugin_does_not_gate_mcp_tools():
     assert "mcp__fazle_core" not in source
 
 
+@_EXTERNAL_INSTALL
 def test_hermes_runner_forces_run_toolset_for_the_relay_key():
     """Pins the capability contract this audit was asked to preserve rather
     than change: the Owner explicitly kept RUN for the Admin relay."""

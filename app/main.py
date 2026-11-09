@@ -295,6 +295,51 @@ def require_command(command: str):
 
 
 # ── Lifespan ───────────────────────────────────────────────────────────────────
+async def _log_rbac_role_coverage() -> None:
+    """Report accounts that hold a token but no role.
+
+    `write_identity_guard` refuses such a token once RBAC_WRITE_MIN_LEVEL > 0, so
+    the operator needs to see the count *before* flipping the switch — and, in
+    audit mode, a reminder of what the log line `[auth][audit] token with no role
+    wrote …` will start producing.
+    """
+    row = await fetch_one(
+        """
+        SELECT COUNT(*) FILTER (WHERE COALESCE(a.status,'active') = 'active') AS active,
+               COUNT(*) FILTER (WHERE COALESCE(a.status,'active') = 'active'
+                                  AND (a.api_key_hash IS NOT NULL
+                                       OR a.login_token_hash IS NOT NULL)) AS with_token
+          FROM fazle_admins a
+         WHERE NOT EXISTS (
+               SELECT 1 FROM fazle_admin_roles ar
+                 JOIN fazle_roles r ON r.name = ar.role_name
+                WHERE ar.admin_id = a.id AND COALESCE(r.level, 0) > 0)
+        """
+    )
+    n_active = int((row or {}).get("active") or 0)
+    n_token = int((row or {}).get("with_token") or 0)
+    minimum = max(0, int(settings.rbac_write_min_level or 0))
+    if minimum > 0:
+        if n_token:
+            log.error(
+                "[security] RBAC_WRITE_MIN_LEVEL=%s is enforced but %d active account(s) "
+                "hold a token with no role — their writes will fail with 403. "
+                "Fix: python scripts/rbac_write_audit.py --grant <role> --username <name>",
+                minimum, n_token,
+            )
+        else:
+            log.info("[security] RBAC write guard enforcing level >= %s; every active "
+                     "token holder has a role", minimum)
+        return
+    if n_active:
+        log.warning(
+            "[security] %d active admin account(s) have no role (%d of them hold a token). "
+            "Writes are allowed for now and logged as '[auth][audit] token with no role'. "
+            "Run `make rbac-audit` before setting RBAC_WRITE_MIN_LEVEL > 0.",
+            n_active, n_token,
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
@@ -361,6 +406,13 @@ async def lifespan(app: FastAPI):
             "[security] RBAC_WRITE_GUARD is off — any valid API token can write, even if "
             "its account is disabled or has no role."
         )
+    # Role coverage: the write guard can only enforce what the accounts can
+    # satisfy. Say so at boot, with the exact command that fixes it.
+    try:
+        await _log_rbac_role_coverage()
+    except Exception as e:  # never block startup on a reporting query
+        log.warning(f"[rbac] role coverage check failed (non-fatal): {e}")
+
     if not (settings.metrics_token or "").strip():
         log.info(
             "[security] /metrics has no token (loopback scrape assumed). Set METRICS_TOKEN "

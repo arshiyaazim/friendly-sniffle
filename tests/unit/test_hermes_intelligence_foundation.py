@@ -6,6 +6,10 @@ from shared.reply_policy import (
     build_whatsapp_reply_policy,
 )
 
+from tests.support.private_data import requires_private
+
+_NEEDS_REGISTER = requires_private("knowledge_base/00_governance/recruitment_fact_authority.json")
+
 
 def test_provider_context_package_separates_authority_from_continuity() -> None:
     package = build_provider_context_package(
@@ -82,6 +86,7 @@ def test_recruitment_builder_keeps_contact_context_outside_policy_authority() ->
     assert "prior_answer_evidence=present" in prompt
 
 
+@_NEEDS_REGISTER
 def test_recruitment_fact_register_never_promotes_unresolved_values() -> None:
     from modules.recruitment_authority import facts_for_evidence
 
@@ -96,6 +101,7 @@ def test_recruitment_fact_register_never_promotes_unresolved_values() -> None:
     assert facts["recruitment.fee.existence"].answerable is True
 
 
+@_NEEDS_REGISTER
 def test_fact_authority_markers_preserve_provenance_and_status() -> None:
     from modules.recruitment_authority import render_authority_markers
 
@@ -109,6 +115,7 @@ def test_fact_authority_markers_preserve_provenance_and_status() -> None:
     assert "resources/ops/recruitment_source_of_truth.txt" in markers
 
 
+@_NEEDS_REGISTER
 def test_recruitment_prompt_consumes_fact_authority_without_approving_salary() -> None:
     from modules.recruitment_authority import render_authority_markers
 

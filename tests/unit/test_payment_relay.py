@@ -69,10 +69,17 @@ def fake_enqueue(monkeypatch):
 @pytest.fixture(autouse=True)
 def _enable_relay(monkeypatch):
     monkeypatch.setenv("PAYMENT_RELAY_ENABLED", "true")
-    for k in ("PAYMENT_RELAY_SOURCE_NUMBER", "PAYMENT_RELAY_DEST_NUMBER",
-              "PAYMENT_RELAY_BRIDGE", "PAYMENT_RELAY_INBOUND_BRIDGE",
-              "PAYMENT_RELAY_RECEIVING_NUMBER"):
-        monkeypatch.delenv(k, raising=False)
+    # The numbers are deliberately NOT in the source (personal data must not be
+    # committed — MASTER_PRODUCTION_PLAN §3); the module reads them from
+    # PAYMENT_RELAY_* and logs an error when the relay is on without them. So a
+    # test configures them the same way an operator does, through the
+    # environment, instead of relying on constants that no longer carry values.
+    monkeypatch.setenv("PAYMENT_RELAY_SOURCE_NUMBER", OWNER)
+    monkeypatch.setenv("PAYMENT_RELAY_DEST_NUMBER", DEST)
+    monkeypatch.setenv("PAYMENT_RELAY_RECEIVING_NUMBER", "8801880446111")
+    monkeypatch.setenv("PAYMENT_RELAY_INBOUND_BRIDGE", "bridge2")
+    monkeypatch.setenv("PAYMENT_RELAY_BRIDGE", "bridge2")
+    monkeypatch.delenv("PAYMENT_RELAY_ACCOUNTING_ENABLED", raising=False)
     # Authoritative bridge→number map (matches the running production process
     # verified 2026-08-30). Stubbed so the defensive label↔number cross-check
     # in is_relay_inbound_bridge() is deterministic and does not depend on the

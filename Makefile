@@ -164,6 +164,12 @@ restore-drill:
 bridge-smoke:
 	$(PYTHON) scripts/bridge_smoke.py
 
+# Who cannot write once RBAC_WRITE_MIN_LEVEL > 0, and the one-line fix.
+.PHONY: rbac-audit
+rbac-audit:
+	@test -n "$(DATABASE_URL)" || (echo "DATABASE_URL is required"; exit 1)
+	$(PYTHON) scripts/rbac_write_audit.py --strict
+
 # ─── Show coverage summary ───────────────────────────────────────────────────
 .PHONY: cov-report
 cov-report:

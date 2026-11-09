@@ -18,6 +18,10 @@ import tempfile
 
 import pytest
 
+from tests.support.private_data import requires_private
+
+_NEEDS_SOURCE = requires_private("resources/ops/recruitment_source_of_truth.txt")
+
 pytestmark = pytest.mark.unit
 
 
@@ -48,6 +52,7 @@ class TestNoReplyGateBrandTokens:
 
 class TestRecruitmentRagIndexing:
 
+    @_NEEDS_SOURCE
     def test_resources_ops_subdirectory_is_now_indexed(self):
         """Regression guard for the real bug found this pass: every
         subdirectory under resources/ used to be unconditionally skipped."""
@@ -98,6 +103,7 @@ class TestRecruitmentRagIndexing:
             os.remove(marker_file)
             os.rmdir(nested_dir)
 
+    @_NEEDS_SOURCE
     def test_historical_ops_files_are_not_candidate_visible(self):
         from modules.rag import _load_resource_files
         sources = _load_resource_files()

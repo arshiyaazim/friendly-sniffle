@@ -56,6 +56,12 @@ Production database, live messaging, Git commit/push বা service পরিব
 - [ ] runtime-এ ব্যবহৃত migration set নিশ্চিত করুন: `db/migrate.py` শুধু
   `db/migrations/*.sql` চালায়; legacy `migrations/` বা module-local migration
   directories-কে runner চালাবে ধরে নেবেন না।
+- [ ] **যাচাই করা হয়েছে (2026-11-06):** খালি database-এ
+  `scripts/apply_schema.py` চালালে ১০৯টি ফাইলই রেকর্ড হয় এবং exit code 0 আসে।
+  শুরুটা আসে `db/migrations/000_virgin_baseline.sql` থেকে, যা tracked history-র
+  আগের ২৯টি table বানায়। শর্ত একটাই: PostgreSQL-এ `pg_trgm` থাকতে হবে
+  (`apt install postgresql-contrib`); না থাকলে ২টি ফাইল `partial` হয় এবং কেবল
+  `gin_trgm_ops` index বাদ পড়ে। বিস্তারিত: README → *Building a virgin database*।
 - [ ] migration inventory তৈরি করে dependency order, duplicate/overlapping
   changes, non-idempotent DDL, production-specific values, seed rows, foreign
   keys/indexes, transaction behavior এবং migration history পরীক্ষা করুন।
@@ -99,6 +105,13 @@ forward-fix-কে অগ্রাধিকার দিন।
 - [ ] office contact ও payroll social links-কে public configuration থেকে
   দেখান; unconfigured contact link UI-তে লুকানো থাকে কি না যাচাই করুন।
 - [ ] RBAC data ও shared authorization dependency ব্যবহার নিশ্চিত করুন।
+- [ ] **write guard enforce করার আগে role coverage ঠিক করুন:** `make rbac-audit`
+  (`scripts/rbac_write_audit.py --strict`) চালান — সক্রিয় admin-দের মধ্যে কেউ
+  role ছাড়া token ধরে থাকলে exit code 1 আসে। তারপর
+  `python scripts/rbac_write_audit.py --grant viewer --username <name>` (অথবা
+  `--all-roleless --yes`) দিয়ে role দিন, `.env`-এ `RBAC_WRITE_MIN_LEVEL=10` সেট
+  করুন, restart দিন, আবার audit চালিয়ে ✓ দেখুন। কোথাও আটকে গেলে caller 403 পাবে;
+  default `0` (audit only) তাই এখনও কাউকে ব্লক করে না।
 - [ ] outbound message, auto-reply ও payment relay শুরুতে বন্ধ রাখুন।
 
 ## 4. WhatsApp bridge সংযোগ
@@ -193,6 +206,37 @@ forward-fix-কে অগ্রাধিকার দিন।
   incident record করুন এবং পরবর্তী পরিবর্তনের আগে থামুন।
 - [ ] backup retention, access review, secret rotation ও restore drill নির্ধারিত
   cadence-এ করুন।
+
+## 10. Test suite triage — সিদ্ধান্ত প্রয়োজন (2026-11-06)
+
+পুরো `tests/unit` বাস্তব PostgreSQL-এ চালিয়ে প্রথমে **১৭৫ failed + ২০ error** হয়েছিল।
+প্রতিটি ফাইল আলাদা করে চালিয়ে, কারণ ঠিক করে, আবার পুরো suite চালানো হয়েছে:
+এখন **৩২ failed, ০ error** (প্রতিটির কারণ README-র "Test suite reality" টেবিলে)।
+যেগুলো এখনো লাল, তার মধ্যে ১১টি কেবল পুরো suite একসাথে চালালে হয় — কারণ টেস্টগুলো
+DB-তে row commit করে rollback করে না, ফলে পরে একই phone number-এ
+`duplicate key ... fazle_admins_phone_key` পড়ে।
+
+নিচের পাঁচটি সিদ্ধান্ত আপনার:
+
+- [ ] **Per-test DB isolation** — ১১টি order-dependent failure ঠিক করতে প্রতি টেস্টে
+  transaction rollback / schema-per-test দরকার। এটি করব কি? (এটি সবচেয়ে বড়
+  অবশিষ্ট কাজ, আর release gate-এর জন্য জরুরি।)
+- [ ] **`knowledge_base/**` ও `resources/ops/**`** — `.gitignore`-এ বাদ দেওয়া
+  private corpus ছাড়া ৬টি টেস্ট চলে না। এগুলো এখন skip হয় (fail নয়)। সিদ্ধান্ত:
+  corpus আলাদা private repo/storage-এ রাখবেন, নাকি টেস্টের জন্য sanitized
+  fixture বানাবেন?
+- [ ] **`scripts/seed_recruitment_kb.sql` ও `scripts/reconcile_recorded_k32.py`** —
+  `test_k32_recruitment_reconciliation` আর `db/migrations/086` এই দুটি ফাইল
+  চায়, কিন্তু repo-তে **কখনো commit হয়নি** (`/scripts/*` ignore করার কারণে)।
+  মূল production reconciliation আর একবার চলবে কি না জানালে স্ক্রিপ্টটি পুনর্গঠন
+  করে un-ignore করা যাবে।
+- [ ] **`test_media_normalization_phase3`** — `app/main.py` এখন খালি text-এর
+  বদলে `[media:<type>]` সংরক্ষণ করে, তাই location/sticker/unknown message
+  "drop" হয় না। কোনটি চান: (ক) টেস্ট নতুন আচরণ অনুযায়ী লিখা, নাকি
+  (খ) পুরোনো "silently drop" আচরণ ফিরিয়ে আনা?
+- [ ] **`.gitignore` বনাম `test_rag_startup_sync_boundary`** — এখন গোটা
+  `/knowledge_base/` ignore হয়, কিন্তু টেস্টটি চায় শুধু `.lock` ফাইল ignore হোক
+  আর canonical register দৃশ্যমান থাকুক। কোনটি সঠিক বলে ধরা হবে?
 
 ## সম্পন্নের প্রমাণ
 

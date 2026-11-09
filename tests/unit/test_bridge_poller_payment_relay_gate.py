@@ -29,10 +29,13 @@ SINGLE = "ID: 01998846707 Maruf islam 01998846707(N) 200/-"
 @pytest.fixture(autouse=True)
 def _relay_env(monkeypatch):
     monkeypatch.setenv("PAYMENT_RELAY_ENABLED", "true")
-    for k in ("PAYMENT_RELAY_SOURCE_NUMBER", "PAYMENT_RELAY_DEST_NUMBER",
-              "PAYMENT_RELAY_BRIDGE", "PAYMENT_RELAY_INBOUND_BRIDGE",
-              "PAYMENT_RELAY_RECEIVING_NUMBER"):
-        monkeypatch.delenv(k, raising=False)
+    # The numbers are configuration, not source (personal data must not be
+    # committed), so the fixture configures them the way an operator does.
+    monkeypatch.setenv("PAYMENT_RELAY_SOURCE_NUMBER", OWNER)
+    monkeypatch.setenv("PAYMENT_RELAY_DEST_NUMBER", "8801844836824")
+    monkeypatch.setenv("PAYMENT_RELAY_RECEIVING_NUMBER", "8801880446111")
+    monkeypatch.setenv("PAYMENT_RELAY_BRIDGE", "bridge2")
+    monkeypatch.setenv("PAYMENT_RELAY_INBOUND_BRIDGE", "bridge2")
     _MAP = {"bridge1": "8801958122300", "bridge2": "8801880446111", "bridge3": "8801805529211"}
     monkeypatch.setattr(pr, "_configured_bridge_number",
                         lambda name: _MAP.get(str(name or "").strip().lower()))

@@ -147,6 +147,7 @@ RECRUITMENT_BOT_COORDINATION.md
 !/scripts/verify_isolation.py
 !/scripts/restore_drill.py
 !/scripts/bridge_smoke.py
+!/scripts/rbac_write_audit.py
 
 # Backup files
 backups/
