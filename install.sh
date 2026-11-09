@@ -324,7 +324,7 @@ fi
 # payroll schema only db/migrations run — the data-bearing prerequisite files are
 # never re-applied behind an operator's back.
 say ""
-say "=== Schema (payroll → escort → db/migrations, tracked in schema_migrations) ==="
+say "=== Schema (baseline → payroll → escort → db/migrations, tracked in schema_migrations) ==="
 if [ ! -f "$APP_DIR/scripts/apply_schema.py" ]; then
   # This exact failure shipped once: .gitignore swallowed the file, so the
   # installer referenced a script that was not in the tree.
@@ -333,8 +333,11 @@ fi
 SCHEMA_RC=0
 DATABASE_URL="$DATABASE_URL" "$VENV_DIR/bin/python" "$APP_DIR/scripts/apply_schema.py" || SCHEMA_RC=$?
 if [ "$SCHEMA_RC" -eq 3 ]; then
-  warn "the schema is INCOMPLETE: some db/migrations files need objects that only"
-  warn "exist in the original production database (see the list above)."
+  warn "the schema is INCOMPLETE (see the list above): a file needed an object that"
+  warn "no tracked SQL creates. db/migrations/000_virgin_baseline.sql covers the"
+  warn "pre-history tables; a remaining failure usually means a missing extension"
+  warn "(pg_trgm → apt install postgresql-contrib) or a hand-made object that only"
+  warn "exists in the production database."
   warn "Recommended: restore a dump of that database instead of building from scratch,"
   warn "or create the missing objects by hand and re-run this script."
   if [ "${ALLOW_INCOMPLETE_SCHEMA:-0}" != "1" ]; then
@@ -345,6 +348,25 @@ elif [ "$SCHEMA_RC" -ne 0 ]; then
   die "schema build failed (exit $SCHEMA_RC) — nothing after this step was run"
 fi
 ok "schema build finished"
+
+# ── 4b. Role coverage — who could not write once the guard is enforced ───────
+# Every write path resolves the caller's role level, and RBAC_WRITE_MIN_LEVEL
+# refuses level 0. An account with a token but no role therefore logs in and then
+# gets 403s; naming it here is cheaper than discovering it from a support call.
+if [ -f "$APP_DIR/scripts/rbac_write_audit.py" ]; then
+  RBAC_REPORT="$(mktemp)"
+  DATABASE_URL="$DATABASE_URL" "$VENV_DIR/bin/python" "$APP_DIR/scripts/rbac_write_audit.py" \
+    > "$RBAC_REPORT" 2>&1 || true
+  if grep -q "have NO role" "$RBAC_REPORT"; then
+    warn "accounts that exist but carry no role (they would be refused writes once"
+    warn "RBAC_WRITE_MIN_LEVEL is raised):"
+    sed -n '/have NO role/,/^[[:space:]]*$/p' "$RBAC_REPORT" | sed 's/^/    /' >&2
+    warn "grant a role with: python scripts/rbac_write_audit.py --grant viewer --username NAME"
+  elif grep -q "every active admin has at least one role" "$RBAC_REPORT"; then
+    ok "every active admin has a role (RBAC_WRITE_MIN_LEVEL can be raised safely)"
+  fi
+  rm -f "$RBAC_REPORT"
+fi
 
 # ── 5. systemd unit ─────────────────────────────────────────────────────────
 if [ ! -f "$APP_DIR/$UNIT_NAME.service" ]; then
