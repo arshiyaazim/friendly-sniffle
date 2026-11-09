@@ -25,6 +25,10 @@ import sys
 
 import pytest
 
+from tests.support.private_data import requires_private
+
+_NEEDS_REGISTER = requires_private("knowledge_base/00_governance/recruitment_fact_authority.json")
+
 # ---------------------------------------------------------------------------
 # Canonical repo path: /home/azim/core
 # Candidate 9Router code path: /tmp/9router-core
@@ -82,6 +86,7 @@ _9R_BASE_URL = "http://127.0.0.1:20129/v1"
 # ---------------------------------------------------------------------------
 # 9Router recruitment inference — Escort duties + application next steps
 # ---------------------------------------------------------------------------
+@_NEEDS_REGISTER
 def test_9router_recruitment_inference_is_grounded_and_safe():
     key = _resolve_9router_api_key()
 
@@ -139,6 +144,7 @@ def test_9router_recruitment_inference_is_grounded_and_safe():
 # ---------------------------------------------------------------------------
 # Absent / unapproved fact — 9Router must not invent business facts
 # ---------------------------------------------------------------------------
+@_NEEDS_REGISTER
 def test_9router_does_not_invent_absent_unapproved_facts():
     key = _resolve_9router_api_key()
     kb_context = build_recruitment_context(_ABSENT_Q)
@@ -169,6 +175,7 @@ def test_9router_does_not_invent_absent_unapproved_facts():
     assert not fabricated, f"9Router must not fabricate confidential facts; got: {reply[:300]}"
 
 
+@_NEEDS_REGISTER
 def test_9router_does_not_invent_ordinary_absent_facts_like_salary_or_benefits():
     key = _resolve_9router_api_key()
     kb_context = build_recruitment_context(_ABSENT_ORDINARY_Q)

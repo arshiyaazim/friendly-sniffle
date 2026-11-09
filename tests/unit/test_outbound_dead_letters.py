@@ -103,7 +103,31 @@ class TestGetOutboundDeadLettersRoute:
 
     async def test_route_registered_no_404(self):
         """The route itself exists in the app's route table -- the actual
-        live regression (every call to this path 404'd since 2026-08-15)."""
+        live regression (every call to this path 404'd since 2026-08-15).
+
+        FastAPI 0.115 keeps an included router as a `_IncludedRouter` wrapper
+        instead of flattening its routes into `app.routes`, so the table has to
+        be walked recursively (the wrapper has no `.path`).
+        """
         from app.main import app
-        paths = {r.path for r in app.routes}
-        assert "/api/outbound/dead-letters" in paths
+
+        def _paths(routes) -> set[str]:
+            found: set[str] = set()
+            for route in routes:
+                path = getattr(route, "path", None)
+                if path:
+                    found.add(path)
+                nested = getattr(route, "routes", None) or []
+                found |= _paths(nested)
+                included = getattr(route, "effective_candidates", None)
+                if callable(included):
+                    try:
+                        found |= _paths(included())
+                    except Exception:
+                        pass
+                original = getattr(route, "original_router", None)
+                if original is not None and getattr(original, "routes", None):
+                    found |= _paths(original.routes)
+            return found
+
+        assert "/api/outbound/dead-letters" in _paths(app.routes)

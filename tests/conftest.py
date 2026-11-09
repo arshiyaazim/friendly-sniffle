@@ -58,6 +58,8 @@ if "FAZLE_LOG_DIR" not in os.environ:
     import tempfile
     os.environ["FAZLE_LOG_DIR"] = tempfile.mkdtemp(prefix="fazle-test-logs-")
 
+from pathlib import Path
+
 import asyncpg
 import pytest
 import pytest_asyncio
@@ -289,512 +291,13 @@ def _setup_test_schema(override_env):
 # 1c. Base schema — pre-migration tables that NO migration creates
 # ─────────────────────────────────────────────────────────────────────────────
 
-_BASE_SCHEMA_SQL = """
--- Recruitment candidate tables — pre-date db/migrations/ (production tables
--- since before the numbered migration era; no CREATE TABLE anywhere in the
--- repo until this stub). Column set + CHECK constraints mirror the live
--- `postgres` DB as captured 2026-08-29. `post_intake_status` (migration
--- 072) and `linked_employee_id` (migration 077) are deliberately NOT here
--- so those migrations actually apply against this schema in tests.
-CREATE TABLE IF NOT EXISTS wbom_candidates (
-    candidate_id        BIGSERIAL PRIMARY KEY,
-    phone               VARCHAR(20) NOT NULL,
-    full_name           VARCHAR(100),
-    age                 INTEGER,
-    area                VARCHAR(100),
-    job_preference      VARCHAR(50),
-    experience_years    INTEGER,
-    available_join_date DATE,
-    funnel_stage        VARCHAR(30) NOT NULL DEFAULT 'new'
-        CHECK (funnel_stage IN ('new','collecting','scored','assigned','contacted','interviewed','hired','rejected','dropped')),
-    collection_step     VARCHAR(30) DEFAULT 'name',
-    score               INTEGER NOT NULL DEFAULT 0 CHECK (score >= 0 AND score <= 100),
-    score_bucket        VARCHAR(10) NOT NULL DEFAULT 'cold' CHECK (score_bucket IN ('hot','warm','cold')),
-    assigned_recruiter  VARCHAR(80),
-    assigned_at         TIMESTAMPTZ,
-    last_contact_at     TIMESTAMPTZ,
-    next_follow_up_at   TIMESTAMPTZ,
-    source              VARCHAR(30) DEFAULT 'whatsapp',
-    source_message      TEXT,
-    notes               TEXT,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_candidates_phone ON wbom_candidates(phone);
-
-CREATE TABLE IF NOT EXISTS wbom_candidate_conversations (
-    conv_id       BIGSERIAL PRIMARY KEY,
-    candidate_id  BIGINT NOT NULL REFERENCES wbom_candidates(candidate_id) ON DELETE CASCADE,
-    step          VARCHAR(30) NOT NULL,
-    direction     VARCHAR(10) NOT NULL DEFAULT 'inbound',
-    message_text  TEXT NOT NULL,
-    collected_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    source_bridge TEXT,
-    message_id    TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_conv_candidate ON wbom_candidate_conversations(candidate_id);
-
-CREATE TABLE IF NOT EXISTS wbom_recruitment_reminders (
-    reminder_id  BIGSERIAL PRIMARY KEY,
-    candidate_id BIGINT NOT NULL REFERENCES wbom_candidates(candidate_id) ON DELETE CASCADE,
-    due_at       TIMESTAMPTZ NOT NULL,
-    reason       VARCHAR(100) NOT NULL,
-    status       VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sent','dismissed')),
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
--- WBOM core tables (pre-date all migrations)
-CREATE TABLE IF NOT EXISTS wbom_employees (
-    employee_id   SERIAL PRIMARY KEY,
-    employee_mobile VARCHAR(20) UNIQUE NOT NULL,
-    employee_name VARCHAR(100) NOT NULL,
-    designation   VARCHAR(30) DEFAULT 'Security Guard',
-    joining_date  DATE,
-    status        VARCHAR(20) DEFAULT 'Active',
-    basic_salary  DECIMAL(10,2) DEFAULT 0,
-    bkash_number  VARCHAR(20),
-    nagad_number  VARCHAR(20),
-    nid_number    VARCHAR(20),
-    bank_account  VARCHAR(50),
-    emergency_contact VARCHAR(20),
-    address       TEXT,
-    created_at    TIMESTAMPTZ DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Matches db/migrations/029's real production schema (contact_name/
--- contact_type never existed in production -- this stub previously guessed
--- wrong column names, the same class of bug fixed in identity_brain's
--- _lookup_contact() on 2026-07-11; it shadows 029's CREATE TABLE IF NOT
--- EXISTS since this bootstrap runs first, so keeping it wrong here means
--- every test silently ran against a schema production never had).
-CREATE TABLE IF NOT EXISTS wbom_contacts (
-    contact_id      SERIAL PRIMARY KEY,
-    whatsapp_number VARCHAR(50) NOT NULL,
-    display_name    VARCHAR(200) NOT NULL DEFAULT '',
-    company_name    VARCHAR(300),
-    relation_type_id INT,
-    business_type_id INT,
-    is_active       BOOLEAN DEFAULT TRUE,
-    relation        VARCHAR(100) DEFAULT 'unknown',
-    platform        VARCHAR(20) DEFAULT 'whatsapp',
-    notes           TEXT,
-    created_at      TIMESTAMPTZ DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS wbom_escort_programs (
-    program_id    SERIAL PRIMARY KEY,
-    mother_vessel VARCHAR(100),
-    lighter_vessel VARCHAR(100),
-    master_mobile VARCHAR(20),
-    destination   VARCHAR(100),
-    cargo_type    VARCHAR(100),
-    importer      VARCHAR(100),
-    escort_name   VARCHAR(100),
-    escort_employee_id INT REFERENCES wbom_employees(employee_id),
-    escort_mobile VARCHAR(20),
-    program_date  DATE,
-    shift         VARCHAR(1) DEFAULT 'D',
-    status        VARCHAR(20) DEFAULT 'Assigned',
-    is_historical BOOLEAN DEFAULT FALSE,
-    start_date    DATE,
-    assignment_time TIMESTAMPTZ DEFAULT NOW(),
-    end_date      DATE,
-    end_shift     VARCHAR(1),
-    release_point VARCHAR(100),
-    day_count     FLOAT,
-    conveyance    DECIMAL(10,2) DEFAULT 0,
-    food_bill     DECIMAL(10,2) DEFAULT 0,
-    capacity      VARCHAR(20),
-    completion_time TIMESTAMPTZ,
-    total_payment DECIMAL(10,2) DEFAULT 0,
-    release_location VARCHAR(100),
-    contact_id    INT REFERENCES wbom_contacts(contact_id),
-    remarks       TEXT,
-    whatsapp_message_id INT,
-    created_at    TIMESTAMPTZ DEFAULT NOW()
-    -- NOTE (found 2026-07-19, Dispatch Phase 2A.3 Stage 6): production's
-    -- real wbom_escort_programs has NO created_at column (confirmed via
-    -- information_schema.columns) -- this stub column is stale test-only
-    -- drift in the OPPOSITE direction of the escort_shift_logs/
-    -- escort_release_matches gaps above. Do not write application code
-    -- that relies on wbom_escort_programs.created_at existing -- use
-    -- assignment_time (present in both environments) instead.
-);
-
-CREATE TABLE IF NOT EXISTS wbom_attendance (
-    attendance_id SERIAL PRIMARY KEY,
-    employee_id   INT REFERENCES wbom_employees(employee_id) ON DELETE CASCADE,
-    attendance_date DATE NOT NULL,
-    status        VARCHAR(20) DEFAULT 'Present',
-    location      VARCHAR(100),
-    check_in_time TIMESTAMPTZ,
-    check_out_time TIMESTAMPTZ,
-    remarks       TEXT,
-    recorded_by   VARCHAR(50),
-    created_at    TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE (employee_id, attendance_date)
-);
-
-CREATE TABLE IF NOT EXISTS wbom_cash_transactions (
-    transaction_id SERIAL PRIMARY KEY,
-    employee_id   INT REFERENCES wbom_employees(employee_id) ON DELETE CASCADE,
-    program_id    INT REFERENCES wbom_escort_programs(program_id),
-    transaction_type VARCHAR(20) NOT NULL,
-    amount        DECIMAL(10,2) NOT NULL,
-    payment_method VARCHAR(10),
-    payment_mobile VARCHAR(20),
-    employee_phone TEXT,
-    payment_number TEXT,
-    transaction_date DATE DEFAULT CURRENT_DATE,
-    transaction_time TIMESTAMPTZ DEFAULT NOW(),
-    status        VARCHAR(20) DEFAULT 'Completed',
-    reference_number VARCHAR(50),
-    remarks       TEXT,
-    created_by    VARCHAR(50),
-    source        TEXT,
-    idempotency_key TEXT,
-    whatsapp_message_id VARCHAR(100),
-    approved_by   TEXT,
-    approved_at   TIMESTAMPTZ
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_test_txn_idempotency
-    ON wbom_cash_transactions (idempotency_key)
-    WHERE idempotency_key IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS wbom_staging_payments (
-    staging_id      SERIAL PRIMARY KEY,
-    message_id      INT,
-    sender_number   VARCHAR(20),
-    extracted_name  VARCHAR(100),
-    extracted_mobile VARCHAR(20),
-    amount          DECIMAL(12,2),
-    payment_method  VARCHAR(20),
-    transaction_type VARCHAR(30),
-    matched_employee_id INT REFERENCES wbom_employees(employee_id),
-    name_match_ratio NUMERIC(4,2),
-    status          VARCHAR(20) DEFAULT 'pending',
-    approved_by     VARCHAR(100),
-    approved_at     TIMESTAMP,
-    created_at      TIMESTAMP DEFAULT NOW(),
-    final_transaction_id INT REFERENCES wbom_cash_transactions(transaction_id),
-    idempotency_key VARCHAR(64)
-);
-CREATE INDEX IF NOT EXISTS idx_staging_payments_status
-    ON wbom_staging_payments (status);
-
-CREATE TABLE IF NOT EXISTS wbom_payroll_runs (
-    run_id        SERIAL PRIMARY KEY,
-    employee_id   INT REFERENCES wbom_employees(employee_id),
-    period_year   INT,
-    period_month  INT,
-    status        VARCHAR(20) DEFAULT 'draft',
-    basic_salary  DECIMAL(10,2) DEFAULT 0,
-    total_programs INT DEFAULT 0,
-    per_program_rate DECIMAL(10,2) DEFAULT 0,
-    program_allowance DECIMAL(10,2) DEFAULT 0,
-    other_allowance DECIMAL(10,2) DEFAULT 0,
-    total_advances DECIMAL(10,2) DEFAULT 0,
-    total_deductions DECIMAL(10,2) DEFAULT 0,
-    gross_salary  DECIMAL(10,2) DEFAULT 0,
-    net_salary    DECIMAL(10,2) DEFAULT 0,
-    computed_by   VARCHAR(50),
-    submitted_by  VARCHAR(50),
-    approved_by   VARCHAR(50),
-    locked_by     VARCHAR(50),
-    paid_by       VARCHAR(50),
-    paid_at       TIMESTAMPTZ,
-    payment_method        VARCHAR(20),
-    payment_reference     TEXT,
-    payout_idempotency_key TEXT UNIQUE,
-    correction_reason     TEXT,
-    computed_at   TIMESTAMPTZ DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ DEFAULT NOW(),
-    created_at    TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS wbom_payroll_run_items (
-    item_id       SERIAL PRIMARY KEY,
-    run_id        INT REFERENCES wbom_payroll_runs(run_id) ON DELETE CASCADE,
-    component_type VARCHAR(50),
-    component_label VARCHAR(200),
-    amount        DECIMAL(10,2),
-    sign          VARCHAR(1) DEFAULT '+',
-    source_table  VARCHAR(50),
-    source_id     INT,
-    notes         TEXT
-);
-
-CREATE TABLE IF NOT EXISTS wbom_payroll_approval_log (
-    log_id        SERIAL PRIMARY KEY,
-    run_id        INT REFERENCES wbom_payroll_runs(run_id),
-    action        VARCHAR(50),
-    from_status   VARCHAR(20),
-    to_status     VARCHAR(20),
-    actor         VARCHAR(50),
-    reason        TEXT,
-    note          TEXT,
-    payload_json  JSONB,
-    created_at    TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS wbom_salary_records (
-    record_id     SERIAL PRIMARY KEY,
-    employee_id   INT REFERENCES wbom_employees(employee_id),
-    salary_month  VARCHAR(7),
-    amount        DECIMAL(10,2),
-    status        VARCHAR(20) DEFAULT 'Pending',
-    payment_date  DATE,
-    created_at    TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS wbom_employee_requests (
-    request_id    SERIAL PRIMARY KEY,
-    employee_id   INT REFERENCES wbom_employees(employee_id),
-    request_type  VARCHAR(30),
-    amount        DECIMAL(10,2),
-    status        VARCHAR(20) DEFAULT 'pending',
-    created_at    TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS wbom_cases (
-    case_id       SERIAL PRIMARY KEY,
-    employee_id   INT REFERENCES wbom_employees(employee_id),
-    case_type     VARCHAR(30),
-    description   TEXT,
-    status        VARCHAR(20) DEFAULT 'open',
-    created_at    TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS wbom_whatsapp_messages (
-    message_id          SERIAL PRIMARY KEY,
-    sender_number       TEXT,
-    message_body        TEXT,
-    message_type        TEXT DEFAULT 'text',
-    direction           TEXT,
-    platform            TEXT,
-    is_processed        BOOLEAN DEFAULT TRUE,
-    contact_identifier  TEXT,
-    contact_id          INT,
-    identity_role       TEXT,
-    identity_confidence FLOAT DEFAULT 0,
-    workflow_triggered  TEXT,
-    received_at         TIMESTAMPTZ DEFAULT NOW(),
-    metadata_json       JSONB,
-    canonical_phone     TEXT,
-    phone_last10        TEXT,
-    source_message_ref  TEXT,
-    source_timestamp    TIMESTAMPTZ,
-    source_context      TEXT,
-    message_hash        TEXT UNIQUE,
-    critical_contact    BOOLEAN DEFAULT FALSE,
-    original_sender_number TEXT,
-    critical_log_path   TEXT,
-    created_at          TIMESTAMPTZ DEFAULT NOW()
-);
-
--- fazle_contact_roles (pre-migration: migration 004 ALTERs it, but we pre-add
--- the columns so they survive even if migration 004's BEGIN/COMMIT transaction
--- rolls back due to seed INSERT failures)
---
--- SCHEMA DRIFT FIX (2026-07-18, Phase 1D): this stub previously defined a
--- shape (id SERIAL, a 'label' column, no sub_role/language_pref/is_active/
--- metadata) that never matched production and never matched migration
--- 029_bootstrap_core_tables_schema_record.sql's own CREATE TABLE IF NOT
--- EXISTS for this table either — because this stub runs first, migration
--- 029's version silently no-op'd against an already-existing (wrong) table
--- every time the test schema was built. Corrected to match migration 029
--- (and live production) exactly. See knowledge_base/00_governance/
--- management_decisions.md, Phase 1D, for the full drift table.
-CREATE TABLE IF NOT EXISTS fazle_contact_roles (
-    id              uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
-    phone           character varying(20) NOT NULL,
-    name            character varying(200) DEFAULT ''::character varying NOT NULL,
-    role            character varying(30) DEFAULT 'unknown'::character varying NOT NULL,
-    sub_role        character varying(30) DEFAULT ''::character varying NOT NULL,
-    language_pref   character varying(10) DEFAULT ''::character varying NOT NULL,
-    platform        character varying(20) DEFAULT 'whatsapp'::character varying NOT NULL,
-    is_active       boolean DEFAULT true,
-    metadata        jsonb DEFAULT '{}'::jsonb,
-    created_at      TIMESTAMPTZ DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ DEFAULT NOW(),
-    confidence      INTEGER NOT NULL DEFAULT 0,
-    source          TEXT    NOT NULL DEFAULT 'seed_rule',
-    priority        INTEGER NOT NULL DEFAULT 50,
-    notes           TEXT    NOT NULL DEFAULT '',
-    UNIQUE (phone),
-    UNIQUE (phone, platform)
-);
-
--- Admin tables (pre-migration)
-CREATE TABLE IF NOT EXISTS fazle_roles (
-    id            SERIAL PRIMARY KEY,
-    name          TEXT UNIQUE,
-    level         INT,
-    description   TEXT
-);
-
-CREATE TABLE IF NOT EXISTS fazle_admins (
-    id            SERIAL PRIMARY KEY,
-    phone         TEXT UNIQUE,
-    name          TEXT,
-    username      TEXT,
-    status        TEXT DEFAULT 'active',
-    notes         TEXT,
-    api_key_hash  TEXT,
-    password_hash TEXT,
-    login_token_hash TEXT,
-    last_seen_at  TIMESTAMPTZ,
-    created_at    TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS fazle_admin_roles (
-    id            SERIAL PRIMARY KEY,
-    admin_id      INT REFERENCES fazle_admins(id) ON DELETE CASCADE,
-    role_name     TEXT REFERENCES fazle_roles(name),
-    granted_by    TEXT,
-    UNIQUE (admin_id, role_name)
-);
-
-CREATE TABLE IF NOT EXISTS fazle_admin_audit (
-    id                SERIAL PRIMARY KEY,
-    actor_phone       TEXT,
-    actor_user_id     INT,
-    actor_label       TEXT,
-    channel           TEXT,
-    command           TEXT,
-    args              TEXT,
-    allowed           BOOLEAN,
-    required_role     TEXT,
-    denied_reason     TEXT,
-    result_summary    TEXT,
-    created_at        TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Misc runtime tables that pre-date migrations
-CREATE TABLE IF NOT EXISTS fazle_report_cache (
-    cache_key     TEXT PRIMARY KEY,
-    payload       JSONB,
-    expires_at    TIMESTAMPTZ
-);
-
-CREATE TABLE IF NOT EXISTS fazle_service_heartbeats (
-    service_name      TEXT PRIMARY KEY,
-    last_seen         TIMESTAMPTZ DEFAULT NOW(),
-    last_message_id   TEXT,
-    queue_depth       INT DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS fazle_db_backups (
-    id            BIGSERIAL PRIMARY KEY,
-    filename      VARCHAR(200),
-    path          TEXT,
-    size_bytes    BIGINT,
-    sha256        VARCHAR(64),
-    status        VARCHAR(20) DEFAULT 'ok',
-    duration_ms   INT,
-    error         TEXT,
-    started_at    TIMESTAMPTZ,
-    finished_at   TIMESTAMPTZ,
-    rotated_at    TIMESTAMPTZ
-);
-
--- escort_roster_entries (referenced by migration 008 FK)
-CREATE TABLE IF NOT EXISTS escort_roster_entries (
-    id SERIAL PRIMARY KEY,
-    program_id INT UNIQUE NOT NULL,
-    mother_vessel TEXT, lighter_vessel TEXT, master_mobile TEXT,
-    escort_name TEXT, escort_mobile TEXT, destination TEXT,
-    start_date DATE, start_shift CHAR(1), end_date DATE, end_shift CHAR(1),
-    total_shifts INT, total_days NUMERIC(6,2), salary NUMERIC(10,2),
-    conveyance NUMERIC(10,2) DEFAULT 0, food_bill NUMERIC(10,2) DEFAULT 0,
-    advance_deduction NUMERIC(12,2) DEFAULT 0, net_payable NUMERIC(12,2) DEFAULT 0,
-    total NUMERIC(12,2), release_point TEXT, roster_status TEXT DEFAULT 'draft',
-    calc_version INT DEFAULT 1, notes TEXT, last_synced_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- escort_calculation_config / escort_roster_audit_logs: defined in the
--- separate, non-db/migrations/ file migrations/escort_roster_schema.sql
--- (production has both, confirmed live via GET /api/escort-roster/config
--- and the "[audit] log_audit failed: relation ... does not exist" warning
--- seen in test runs) -- never ported into the db/migrations/ set this
--- fixture's _run_all_migrations() scans, so they were missing from every
--- test DB. Added here 2026-07-18 (Phase 1I) after this gap blocked a
--- concurrency reproduction from exercising sync_program_to_roster()'s real
--- pay-calculation code path. Column shapes copied verbatim from that file.
-CREATE TABLE IF NOT EXISTS escort_calculation_config (
-    id SERIAL PRIMARY KEY,
-    destination VARCHAR(120) NOT NULL,
-    destination_key VARCHAR(120) NOT NULL UNIQUE,
-    conveyance_amount NUMERIC(10,2) NOT NULL DEFAULT 0,
-    shift_rate NUMERIC(10,2) NOT NULL DEFAULT 200,
-    notes TEXT, updated_by TEXT, updated_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-INSERT INTO escort_calculation_config
-    (destination, destination_key, conveyance_amount, shift_rate)
-VALUES
-    ('Narayanganj', 'narayanganj', 600,  200),
-    ('Noapara',     'noapara',     1000, 200),
-    ('Nagarbari',   'nagarbari',   900,  200),
-    ('Aricha',      'aricha',      900,  200),
-    ('Bhairab',     'bhairab',     800,  200),
-    ('Ashuganj',    'ashuganj',    800,  200),
-    ('Chandpur',    'chandpur',    700,  200),
-    ('Barishal',    'barishal',    1200, 200),
-    ('Mongla',      'mongla',      1500, 200)
-ON CONFLICT (destination_key) DO NOTHING;
-
-CREATE TABLE IF NOT EXISTS escort_roster_audit_logs (
-    id SERIAL PRIMARY KEY,
-    program_id INTEGER NOT NULL,
-    roster_entry_id INTEGER,
-    action VARCHAR(60) NOT NULL,
-    old_data JSONB, new_data JSONB,
-    performed_by TEXT, source TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
--- escort_shift_logs: same gap as escort_calculation_config/
--- escort_roster_audit_logs above (defined only in migrations/
--- escort_roster_schema.sql, never ported into db/migrations/). Found
--- 2026-07-19 (Dispatch Phase 2A.3 Stage 3): _write_shift_log()
--- (modules/escort_roster/db.py) swallows the resulting UndefinedTableError
--- internally, but that does not undo Postgres's transaction-abort state --
--- every subsequent statement in the same transaction then fails with
--- "current transaction is aborted", masking the real cause. Column shapes
--- copied verbatim from that file.
-CREATE TABLE IF NOT EXISTS escort_shift_logs (
-    id SERIAL PRIMARY KEY,
-    program_id INTEGER NOT NULL,
-    shift_date DATE NOT NULL,
-    shift CHAR(1) NOT NULL CHECK (shift IN ('D', 'N')),
-    log_type VARCHAR(20) NOT NULL,
-    notes TEXT, recorded_by TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
--- escort_release_matches: same gap as escort_shift_logs above (defined
--- only in migrations/escort_roster_schema.sql, never ported into
--- db/migrations/ -- confirmed present in production, 0 rows, via direct
--- to_regclass() check). Found 2026-07-19 (Dispatch Phase 2A.3 Stage 5)
--- before it could repeat the same transaction-abort masking failure mode.
--- Column shapes copied verbatim from that file.
-CREATE TABLE IF NOT EXISTS escort_release_matches (
-    id SERIAL PRIMARY KEY,
-    extraction_id INTEGER,
-    program_id INTEGER,
-    match_confidence NUMERIC(5,4) DEFAULT 0,
-    match_reason TEXT,
-    matched_fields JSONB DEFAULT '{}',
-    admin_action VARCHAR(20),
-    admin_phone TEXT,
-    acted_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-"""
+# The pre-migration baseline now lives in db/migrations/000_virgin_baseline.sql:
+# the installer applies it, and the tests load the SAME file. Keeping a second
+# copy here is what let the test schema drift from production for months.
+_BASE_SCHEMA_SQL = (
+    Path(__file__).resolve().parents[1]
+    / "db" / "migrations" / "000_virgin_baseline.sql"
+).read_text(encoding="utf-8")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -987,13 +490,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_error_log
 # 1f. Minimal seed data
 # ─────────────────────────────────────────────────────────────────────────────
 
+# The role ladder must be the production one (db/migrations/093_seed_rbac_roles.sql,
+# documented in README): 10/20/30/50/70/100. This block used to seed 1..5 with no
+# `office_assistant`, so every level comparison in the suite ran against a ladder
+# that only exists in tests — `RBAC_WRITE_MIN_LEVEL=10` would have refused the
+# *superadmin* (5) while `live_adapters` compares against those same numbers.
+# tests/unit/test_rbac_role_ladder.py keeps this in step with migration 093.
 _SEED_SQL = """
 INSERT INTO fazle_roles (name, level, description) VALUES
-  ('viewer',     1, 'Read-only'),
-  ('operator',   2, 'Approve drafts, process payments'),
-  ('accountant', 3, 'Payroll and payment operations'),
-  ('admin',      4, 'System management'),
-  ('superadmin', 5, 'Full access')
+  ('viewer',           10, 'Read-only access to operational status'),
+  ('office_assistant', 20, 'View attendance list/own records; create attendance draft entries only'),
+  ('operator',         30, 'Approve/reject drafts and edit operational records'),
+  ('accountant',       50, 'Payroll, cash, income and payment reconciliation'),
+  ('admin',            70, 'Administrative control over users and operational configuration'),
+  ('superadmin',      100, 'Full owner access, including admin management')
 ON CONFLICT (name) DO NOTHING;
 """
 
@@ -1297,6 +807,38 @@ def _reset_admin_command_dedup_cache():
     _dedup_cache.clear()
     yield
     _dedup_cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_settings_cache_after_each_test():
+    """Drop the memoised `Settings` between tests.
+
+    `app.config.get_settings` is `lru_cache`d and several modules hold the object
+    they got from it (`app.database` calls `get_settings()` per query, `app.llm`
+    binds the function at import). A test that strips the environment — the LLM
+    chain-order file does — can leave a Settings cached *without* `DATABASE_URL`,
+    and the next module then connects to the default `127.0.0.1:5432` and fails
+    with "Connect call failed" even though the database is up on 5433. Clearing
+    after each test keeps the cache describing the real environment.
+    """
+    before = dict(os.environ)
+    yield
+    # Some modules assign to os.environ directly instead of using monkeypatch
+    # (a habit from the bridge scripts), and the value then leaks into every
+    # later test in the session: the escort/route-B files pass alone but fail
+    # after the rest of the suite because a bridge number or flag changed under
+    # them. Restoring the environment is the only way an ordering-independent
+    # suite can exist here.
+    for key in list(os.environ):
+        if key not in before:
+            os.environ.pop(key, None)
+    os.environ.update(before)
+    try:
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+    except Exception:
+        pass
 
 
 @pytest.fixture
@@ -1661,100 +1203,7 @@ PAYLOAD_ADMIN_REJECT = make_bridge_payload(
     source="bridge2",
 )
 
-def _split_sql_safe(sql_text: str) -> list[str]:
-    """Split SQL into individual statements, properly handling:
-    - Dollar-quoted strings ($$ ... $$ or $tag$ ... $tag$)
-    - Single-quoted strings ('...;...')
-    - Parenthesis depth (semicolons inside CREATE TABLE)
-    - Line comments (-- ...)
-    """
-    statements: list[str] = []
-    current: list[str] = []
-    paren_depth = 0
-    i = 0
-    n = len(sql_text)
-    in_single_quote = False
-    in_dollar_quote = False
-    dollar_tag = ""
-    
-    while i < n:
-        ch = sql_text[i]
+# Shared with scripts/apply_schema.py — one splitter, two runners.
+from shared.sql_split import split_sql as _split_sql_safe
 
-        # Check for line comment (-- ...) — consume verbatim through end of
-        # line so semicolons inside human-readable comment text (extremely
-        # common in pg_dump output, e.g. "-- Name: x; Type: TABLE; ...") never
-        # get treated as statement boundaries.
-        if not in_single_quote and not in_dollar_quote and ch == "-" and i + 1 < n and sql_text[i + 1] == "-":
-            eol = sql_text.find("\n", i)
-            eol = n if eol == -1 else eol + 1
-            current.append(sql_text[i:eol])
-            i = eol
-            continue
 
-        # Check for dollar-quoted string start/end
-        if not in_single_quote and ch == "$":
-            # Try to match a dollar quote tag
-            j = i + 1
-            while j < n and (sql_text[j].isalnum() or sql_text[j] == "_"):
-                j += 1
-            if j < n and sql_text[j] == "$":
-                tag = sql_text[i:j+1]  # $tag$ or $$
-                if in_dollar_quote and tag == dollar_tag:
-                    in_dollar_quote = False
-                    dollar_tag = ""
-                    current.append(sql_text[i:j+1])
-                    i = j + 1
-                    continue
-                elif not in_dollar_quote:
-                    in_dollar_quote = True
-                    dollar_tag = tag
-                    current.append(sql_text[i:j+1])
-                    i = j + 1
-                    continue
-        
-        if in_dollar_quote:
-            current.append(ch)
-            i += 1
-            continue
-        
-        # Check for single-quoted string
-        if ch == "'" and not in_dollar_quote:
-            if in_single_quote:
-                # Check for escaped quote ('')
-                if i + 1 < n and sql_text[i+1] == "'":
-                    current.append("''")
-                    i += 2
-                    continue
-                else:
-                    in_single_quote = False
-            else:
-                in_single_quote = True
-            current.append(ch)
-            i += 1
-            continue
-        
-        if in_single_quote:
-            current.append(ch)
-            i += 1
-            continue
-        
-        # Track parenthesis depth
-        if ch == "(":
-            paren_depth += 1
-        elif ch == ")":
-            paren_depth = max(0, paren_depth - 1)
-        
-        # Check for statement end (semicolon at paren_depth 0)
-        if ch == ";" and paren_depth == 0:
-            current.append(ch)
-            statements.append("".join(current))
-            current = []
-            i += 1
-            continue
-        
-        current.append(ch)
-        i += 1
-    
-    if current:
-        statements.append("".join(current))
-    return statements

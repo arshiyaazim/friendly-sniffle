@@ -1,5 +1,5 @@
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 from modules.recruitment_ai import (
     _RECRUITMENT_SOURCE,
@@ -15,13 +15,24 @@ from modules.recruitment_flow import (
     recruitment_eligibility,
 )
 
+from tests.support.private_data import requires_private
 
+from tests.support.private_data import requires_private
+
+_NEEDS_REGISTER = requires_private("knowledge_base/00_governance/recruitment_fact_authority.json")
+
+_NEEDS_SOURCE = requires_private("resources/ops/recruitment_source_of_truth.txt")
+
+
+
+@_NEEDS_SOURCE
 def test_recruitment_source_is_inside_approved_ops_path():
     expected_parent = Path("/home/azim/core/resources/ops")
     assert _RECRUITMENT_SOURCE.parent == expected_parent
     assert _RECRUITMENT_SOURCE.name == "recruitment_source_of_truth.txt"
 
 
+@_NEEDS_SOURCE
 def test_recruitment_source_contains_final_authoritative_facts():
     office = build_recruitment_source_context("অফিস কখন খোলা?")
     escort = build_recruitment_source_context("Escort salary and age")
@@ -43,6 +54,7 @@ def test_recruitment_source_contains_final_authoritative_facts():
     assert "আর্থিক কারণে বাদ" not in office + escort + age
 
 
+@_NEEDS_SOURCE
 def test_recruitment_source_has_no_retired_conflicting_facts():
     source = _RECRUITMENT_SOURCE.read_text(encoding="utf-8")
     for retired_fact in (
@@ -61,6 +73,7 @@ def test_recruitment_source_has_no_retired_conflicting_facts():
         assert retired_fact not in source
 
 
+@_NEEDS_SOURCE
 def test_fee_policy_is_only_loaded_for_fee_questions():
     # 2026-08-21 (recruitment fee/source-of-truth conflict closure): the
     # fee section no longer states a specific figure at all -- it was
@@ -104,6 +117,7 @@ def test_fee_question_reply_matching_canonical_policy_is_allowed():
     assert reply == "কোনো ঘুষ বা অবৈধ জামানত নেওয়া হয় না, বেতন থেকে কিস্তিতে কাটা হয়।"
 
 
+@_NEEDS_SOURCE
 def test_non_fee_reply_is_cleaned_normally():
     context = build_recruitment_source_context("অফিস কখন খোলা?")
     reply = enforce_recruitment_reply_policy(
@@ -281,14 +295,21 @@ async def test_fresh_session_followup_is_draft_only_not_autosend():
 
 
 async def test_common_outbound_meta_alias_dispatches_to_meta_whatsapp():
+    from modules import outbound
     from modules.outbound import _send_with_channel
 
     sender = AsyncMock(return_value="meta-message-id")
-    with patch("modules.social_auto_reply.send_queue._send_meta_whatsapp", new=sender):
+    # The transport-authorization gate has its own tests
+    # (tests/db/test_outbound_authorization_revalidation.py); here the subject is
+    # only which channel an alias dispatches to.
+    with patch("modules.social_auto_reply.send_queue._send_meta_whatsapp", new=sender), \
+         patch.object(outbound, "is_transport_authorized", return_value=True):
         result = await _send_with_channel("meta", "8801999999999", "reply")
 
     assert result == "meta-message-id"
-    sender.assert_awaited_once_with("8801999999999", "reply")
+    # the channel call now carries the transport authorization through
+    _ANY = ANY
+    sender.assert_awaited_once_with("8801999999999", "reply", authorization=_ANY)
 
 
 # ===========================================================================
@@ -304,6 +325,7 @@ def _k31_stale_rows():
     }]
 
 
+@_NEEDS_REGISTER
 async def test_k31_approved_policy_facts_bypass_stale_fallback(monkeypatch):
     import modules.knowledge_base as kb
 
@@ -331,6 +353,7 @@ async def test_k31_approved_policy_facts_bypass_stale_fallback(monkeypatch):
     assert "LEGACY" not in office + eligibility + documents + training + probation + duty + fees
 
 
+@_NEEDS_REGISTER
 async def test_k31_role_specific_approved_salary_survives_narrow_conflict(monkeypatch):
     import modules.knowledge_base as kb
 
@@ -343,6 +366,7 @@ async def test_k31_role_specific_approved_salary_survives_narrow_conflict(monkey
     assert "10:00-17:00" not in reply
 
 
+@_NEEDS_REGISTER
 async def test_k31_conflicting_salary_fee_schedule_and_vacancy_fail_closed(monkeypatch):
     import modules.knowledge_base as kb
 
@@ -357,6 +381,7 @@ async def test_k31_conflicting_salary_fee_schedule_and_vacancy_fail_closed(monke
     assert vacancies == "এই বিষয়ে নিশ্চিত তথ্যের জন্য অফিসে যোগাযোগ করুন।"
 
 
+@_NEEDS_REGISTER
 async def test_k31_generic_or_misclassified_recruitment_path_never_returns_legacy(monkeypatch):
     import modules.knowledge_base as kb
 

@@ -54,6 +54,18 @@ CREATE TABLE IF NOT EXISTS fazle_recruitment_sessions (
     updated_at      timestamptz NOT NULL DEFAULT now()
 );
 
+-- 002_align_tables.sql creates this table first, without the columns 003's own
+-- CREATE TABLE expects. On a virgin database the CREATE became a no-op and the
+-- index below failed with "column status does not exist" (audit 2026-11-06).
+ALTER TABLE fazle_recruitment_sessions
+    ADD COLUMN IF NOT EXISTS step           text NOT NULL DEFAULT 'name',
+    ADD COLUMN IF NOT EXISTS name           text,
+    ADD COLUMN IF NOT EXISTS experience     integer,
+    ADD COLUMN IF NOT EXISTS phone_confirm  text,
+    ADD COLUMN IF NOT EXISTS status         text NOT NULL DEFAULT 'active',
+    ADD COLUMN IF NOT EXISTS candidate_id   integer
+        REFERENCES wbom_candidates(candidate_id) ON DELETE SET NULL;
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_recruitment_sessions_phone_active
     ON fazle_recruitment_sessions (phone)
     WHERE status = 'active';

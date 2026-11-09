@@ -1,10 +1,11 @@
 """scripts/apply_schema.py — the schema build plan itself.
 
 The plan is the load-bearing part: `db/migrations/` alone cannot build a virgin
-database, because it asserts tables created by two older standalone sets. These
-tests pin the order (payroll → escort → db/migrations) and the naming contract
-that keeps `scripts/apply_schema.py` and `db/migrate.py` agreeing about what has
-already been applied.
+database, because it asserts tables created by `000_virgin_baseline.sql` and by
+two older standalone sets. These tests pin the order
+(baseline → payroll → escort → db/migrations), the `--only` scopes, and the
+naming contract that keeps `scripts/apply_schema.py` and `db/migrate.py` agreeing
+about what has already been applied.
 """
 from __future__ import annotations
 
@@ -29,15 +30,42 @@ def _load(argv=()):
         sys.argv = old_argv
 
 
-def test_plan_has_the_three_sets_in_order():
+def test_plan_has_the_four_sets_in_order():
     plan = _load()._plan()
     groups = [g for _key, _path, g in plan]
-    # every payroll file comes before every escort file, which comes before core
-    assert groups == sorted(groups, key=["payroll", "escort", "core"].index)
+    # baseline first, then payroll, escort, core — each set internally ordered
+    assert groups == sorted(groups, key=["baseline", "payroll", "escort", "core"].index)
+    assert groups.count("baseline") == 1
     assert groups.count("payroll") == 14
     assert groups.count("escort") == 2
     assert groups.count("core") == 92
-    assert len(plan) == 108
+    assert len(plan) == 109
+
+
+def test_baseline_is_first_and_is_the_virgin_database_s_floor():
+    plan = _load()._plan()
+    key, path, group = plan[0]
+    assert group == "baseline"
+    assert key == "000_virgin_baseline.sql"
+    sql = Path(path).read_text(encoding="utf-8", errors="ignore").lower()
+    assert "create table if not exists wbom_candidates" in sql
+    assert "create table if not exists fazle_outbound_queue" in sql
+    assert "create table if not exists wbom_relation_types" in sql
+    # idempotent by construction: nothing may DROP or DELETE unconditionally
+    assert "drop table" not in sql
+
+
+def test_only_baseline_is_the_baseline_file_alone():
+    plan = _load(["--only", "baseline"])._plan()
+    assert plan == [("000_virgin_baseline.sql",
+                     str(ROOT / "db" / "migrations" / "000_virgin_baseline.sql"),
+                     "baseline")]
+
+
+def test_only_foundation_keeps_the_old_prerequisite_behaviour():
+    plan = _load(["--only", "foundation"])._plan()
+    assert {g for _k, _p, g in plan} == {"baseline", "payroll", "escort"}
+    assert len(plan) == 17
 
 
 def test_core_keys_match_db_migrate_py_names():
@@ -116,6 +144,29 @@ def test_known_gap_list_matches_the_real_blockers():
         "fazle_contact_roles",
     }
     assert set(mod.KNOWN_MISSING_OBJECTS) == expected
+    # …and every one of them is now created by the baseline, so a virgin build
+    # does not stop at any of them. This is the assertion that keeps the two in
+    # step: drop a table from the baseline and this fails before an install does.
+    baseline = (ROOT / "db" / "migrations" / "000_virgin_baseline.sql").read_text(
+        encoding="utf-8", errors="ignore").lower()
+    for name in expected:
+        if name.startswith("role "):
+            assert "create role" in baseline and name.split(" ", 1)[1] in baseline, name
+        elif name == "fazle_payment_drafts.employee_phone":
+            # The only object on this list the baseline does not create: 002
+            # creates fazle_payment_drafts *after* 003c's rename, already named
+            # employee_mobile. That is why 003c is recorded as an assumption
+            # (HISTORICAL_ASSUMPTIONS) instead of applied.
+            align = (ROOT / "db" / "migrations" / "002_align_tables.sql").read_text(
+                encoding="utf-8", errors="ignore").lower()
+            assert "create table if not exists fazle_payment_drafts" in align
+            assert "employee_mobile" in align
+            assert "employee_phone" not in align
+        elif "." in name:
+            table, column = name.split(".", 1)
+            assert table in baseline and column in baseline, name
+        else:
+            assert f"create table if not exists {name}" in baseline, name
     assert set(mod.VIRGIN_NOOP_FILES) == {"086_k32_recruitment_reconciliation.sql"}
     assert set(mod.HISTORICAL_ASSUMPTIONS) == {
         "003_kb_schema_fix_and_recruitment.sql",

@@ -10,6 +10,10 @@ import modules.recruitment_flow as recruitment_flow
 from modules.conversation_layer import generate_recruitment_reply as public_fallback
 from modules.conversation_layer.recruitment import generate_recruitment_reply
 
+from tests.support.private_data import requires_private
+
+_NEEDS_REGISTER = requires_private("knowledge_base/00_governance/recruitment_fact_authority.json")
+
 
 async def _fallback(text: str, *, llm_reply: str | None = None, history: str | None = None, contact: str | None = None):
     with patch(
@@ -40,6 +44,7 @@ def test_hermes_success_is_before_the_existing_fallback_and_failure_enters_it():
     assert fallback_guard > fallback
 
 
+@_NEEDS_REGISTER
 async def test_hermes_failure_uses_existing_authority_safe_fallback_without_send():
     result, llm = await _fallback("বেতন কত?", llm_reply="বেতন ৳৯,০০০")
     assert result["path"] == "authority_safe_unresolved_fact"
@@ -49,6 +54,7 @@ async def test_hermes_failure_uses_existing_authority_safe_fallback_without_send
     assert result["sent"] is False
 
 
+@_NEEDS_REGISTER
 async def test_approved_current_fact_remains_answerable_when_llm_is_unavailable():
     result, llm = await _fallback("অফিস কোথায়?", llm_reply=None)
     assert "আগ্রাপাড়া" in result["reply"]
@@ -68,6 +74,7 @@ async def test_approved_current_fact_remains_answerable_when_llm_is_unavailable(
         ("seed FAQ-র তথ্য দিন", ("৳", "বেতন", "জয়েনিং")),
     ],
 )
+@_NEEDS_REGISTER
 async def test_unverified_conflicting_and_superseded_facts_are_not_current_answers(question, forbidden):
     result, llm = await _fallback(question, llm_reply="legacy value ৳৩,৫০০")
     assert result["path"] == "authority_safe_unresolved_fact"
@@ -75,6 +82,7 @@ async def test_unverified_conflicting_and_superseded_facts_are_not_current_answe
     llm.assert_not_awaited()
 
 
+@_NEEDS_REGISTER
 async def test_legacy_hardcoded_value_cannot_override_approved_register():
     result, llm = await _fallback(
         "অফিস কোথায়?",
@@ -87,6 +95,7 @@ async def test_legacy_hardcoded_value_cannot_override_approved_register():
     llm.assert_awaited_once()
 
 
+@_NEEDS_REGISTER
 async def test_identity_and_conversation_context_are_preserved_without_becoming_policy():
     with patch(
         "modules.conversation_layer.recruitment._safe_kb_reply",
@@ -113,6 +122,7 @@ async def test_identity_and_conversation_context_are_preserved_without_becoming_
     assert "Canonical public facts" not in prompt
 
 
+@_NEEDS_REGISTER
 async def test_missing_fact_continues_naturally_and_never_generates_outbound_message():
     result, llm = await _fallback("এই পদের বেতন কত?", llm_reply="salary ৳৯,০০০")
     assert "নিশ্চিত" in result["reply"]

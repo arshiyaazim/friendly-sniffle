@@ -7,6 +7,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from tests.support.private_data import requires_private
+
+_NEEDS_REGISTER = requires_private("knowledge_base/00_governance/recruitment_fact_authority.json")
+
 pytestmark = pytest.mark.unit
 
 
@@ -118,6 +122,7 @@ def test_authority_lock_ignore_is_exact_and_unknown_runtime_paths_remain_visible
     assert check(unknown_runtime).returncode != 0
 
 
+@_NEEDS_REGISTER
 def test_authority_lock_file_and_register_are_preserved():
     repo = Path(__file__).resolve().parents[2]
     lock = repo / "knowledge_base/00_governance/recruitment_fact_authority.json.lock"

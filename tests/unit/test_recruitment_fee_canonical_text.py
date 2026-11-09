@@ -16,6 +16,10 @@ replacing that section with the exact canonical text.
 """
 from modules.conversation_layer.playbooks import CANONICAL_FACTS
 
+from tests.support.private_data import requires_private
+
+_NEEDS_SOURCE = requires_private("resources/ops/recruitment_source_of_truth.txt")
+
 CANONICAL_FEE_TEXT = (
     "চাকরির জন্য কোনো ঘুষ বা অবৈধ জামানত নেওয়া হয় না। প্রসেসিং/জয়েনিং ফি অন্যান্য "
     "প্রতিষ্ঠানের মত এখানেও আছে, তবে অগ্রিম নেওয়ার বদলে মাসিক বেতন থেকে "
@@ -34,6 +38,7 @@ def test_playbooks_canonical_fact_matches_governance_decision():
     assert CANONICAL_FACTS["fee"] == CANONICAL_FEE_TEXT
 
 
+@_NEEDS_SOURCE
 def test_source_of_truth_file_no_longer_has_stale_specific_figures():
     from modules.hermes_dispatch import _RECRUITMENT_SOURCE_PATH
 
@@ -43,6 +48,7 @@ def test_source_of_truth_file_no_longer_has_stale_specific_figures():
     assert _STALE_NEVER_SAY_NO_FEE not in text, "stale contradictory instruction still present"
 
 
+@_NEEDS_SOURCE
 def test_source_of_truth_file_now_carries_the_canonical_policy_text():
     from modules.hermes_dispatch import _RECRUITMENT_SOURCE_PATH
 
@@ -55,6 +61,7 @@ def test_source_of_truth_file_now_carries_the_canonical_policy_text():
     assert "01958-122300" in text
 
 
+@_NEEDS_SOURCE
 def test_build_recruitment_context_includes_canonical_fee_text_on_fee_question():
     import modules.hermes_dispatch as hd
 
