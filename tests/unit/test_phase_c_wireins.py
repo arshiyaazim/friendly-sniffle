@@ -10,6 +10,33 @@ import sys, types
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _purge_modules_imported_under_the_stubs():
+    """Delete anything imported while `app`/`app.config` were stubbed.
+
+    Several tests below pop `app`, `app.config` and `app.database` from
+    `sys.modules` and install fakes, to prove the config gate fails closed.
+    That works for the test itself, but any production module *imported during
+    that window* binds the fakes permanently:
+
+        modules.escort did `from app.database import fetch_all` while the stub
+        `fetch_all = lambda *a, **k: []` was installed → the real function is
+        gone, and later tests fail with
+        "TypeError: object list can't be used in 'await' expression".
+
+    That is why test_trusted_group_escort_orders (and, in a full-session run,
+    the escort/route-B files) failed only after this module ran. Purging the
+    modules imported under the stubs makes the next test import the real ones.
+    """
+    before = set(sys.modules)
+    yield
+    for name in list(sys.modules):
+        if name in before:
+            continue
+        if name == "app" or name.startswith("app.") or name.startswith("modules"):
+            sys.modules.pop(name, None)
+
+
 # === app/config flags default OFF ===
 
 def test_phase_c_flags_default_off():
@@ -300,11 +327,16 @@ def test_v2_cross_ref_enabled_fails_closed_on_missing_config():
 
     # Don't poison sys.modules permanently; do a targeted patch.
     import importlib
+    # Import the gate *before* the fake config is installed: the module does
+    # `from app.config import get_settings` at import time, so importing it
+    # inside the fake window would raise there instead of exercising the gate's
+    # own lazy-import try/except (which is what this test is about).
+    from modules.message_router import _v2_cross_ref_enabled
+
     # Save and restore app.config in sys.modules around the call.
     saved = sys.modules.get("app.config")
     sys.modules["app.config"] = _BrokenConfig()  # type: ignore[assignment]
     try:
-        from modules.message_router import _v2_cross_ref_enabled
         assert _v2_cross_ref_enabled() is False
     finally:
         # CRITICAL: restore so subsequent tests work.

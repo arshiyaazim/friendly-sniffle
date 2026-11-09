@@ -113,6 +113,13 @@ async def test_startup_guard_preserves_inbound_poller_start(monkeypatch):
     import modules.bridge_poller as poller
 
     monkeypatch.setenv("OUTBOUND_ENABLED", "false")
+    # `start_pollers()` reads this ambient variable with a **default of true**,
+    # so without pinning it the test asserts 3 tasks but gets 6 (three inbound
+    # plus three outbound pollers) as soon as any earlier test leaves a
+    # different value in the environment — the order-dependent failure this
+    # suite kept producing. The variable under test here is the send-control
+    # guard, not outbound capture.
+    monkeypatch.setenv("BRIDGE_OUTBOUND_CAPTURE_ENABLED", "false")
     clients = [_bridge(_HTTP()), _bridge(_HTTP()), _bridge(_HTTP())]
     monkeypatch.setattr(poller, "init_tables", lambda: asyncio.sleep(0))
     monkeypatch.setattr(poller, "get_bridge1", lambda: clients[0])
