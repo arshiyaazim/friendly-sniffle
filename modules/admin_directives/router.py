@@ -277,8 +277,8 @@ async def _authorize(sender_phone: str, command: str) -> Optional[dict]:
 
 async def _handle_ai_query(question: str, sender_phone: str) -> str:
     now = time.monotonic()
-    last = _ai_cooldown.get(sender_phone, 0.0)
-    if now - last < _AI_COOLDOWN_SECONDS:
+    last = _ai_cooldown.get(sender_phone)
+    if last is not None and now - last < _AI_COOLDOWN_SECONDS:
         return "⏳ একটু অপেক্ষা করুন। কিছুক্ষণ পর আবার জিজ্ঞেস করুন।"
 
     admin = await _authorize(sender_phone, "ai_query")
@@ -840,8 +840,14 @@ async def trigger_admin_investigation(job_name: str, alert_context: str) -> None
 
     now = time.monotonic()
     cooldown_s = max(int(settings.hermes_alert_investigation_cooldown_seconds or 3600), 60)
-    last = _investigation_cooldown.get(job_name, 0.0)
-    if now - last < cooldown_s:
+    # A missing entry means "never fired", which is NOT the same as "fired at
+    # monotonic time 0": on a host whose monotonic clock is younger than the
+    # cooldown (i.e. any server started less than an hour ago), `now - 0.0`
+    # is itself below the cooldown, so every first alert would be skipped and
+    # the investigation could never run until the machine had been up for the
+    # full cooldown. Keep the sentinel explicit.
+    last = _investigation_cooldown.get(job_name)
+    if last is not None and now - last < cooldown_s:
         log.info(
             "[phase5b_trigger] job=%s event=skipped reason=cooldown remaining_s=%d",
             job_name, int(cooldown_s - (now - last)),
@@ -978,8 +984,8 @@ async def trigger_recruitment_policy_clarification(
 
     now = time.monotonic()
     cooldown_s = max(int(settings.hermes_alert_investigation_cooldown_seconds or 3600), 60)
-    last = _policy_clarification_cooldown.get(subject_key, 0.0)
-    if now - last < cooldown_s:
+    last = _policy_clarification_cooldown.get(subject_key)
+    if last is not None and now - last < cooldown_s:
         log.info(
             "[recruitment_policy_escalation] event=skipped reason=cooldown subject_key=%s remaining_s=%d",
             subject_key, int(cooldown_s - (now - last)),
@@ -1332,8 +1338,8 @@ async def _handle_hermes_relay(request_text: str, sender_phone: str, source_brid
         return _fmt_invite(inv_result)
 
     now = time.monotonic()
-    last = _hermes_cooldown.get(sender_phone, 0.0)
-    if now - last < _HERMES_COOLDOWN_SECONDS:
+    last = _hermes_cooldown.get(sender_phone)
+    if last is not None and now - last < _HERMES_COOLDOWN_SECONDS:
         return "⏳ একটু অপেক্ষা করুন। Hermes ইতিমধ্যে একটি অনুরোধ প্রক্রিয়া করছে।"
     _hermes_cooldown[sender_phone] = now
 

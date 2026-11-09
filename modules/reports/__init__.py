@@ -735,6 +735,82 @@ async def _b_unresolved_fpe_employees(**kwargs) -> dict:
     }
 
 
+async def _b_data_hygiene(**kwargs) -> dict:
+    """Read-only inventory of data that needs a human decision (Stage I20/I23).
+
+    Three questions, none of which changes a row:
+
+    1. which pending cash transactions are test artefacts / duplicates / orphaned
+       (the same classification `review_linkage_repair` uses before any cleanup);
+    2. which business proposals carry a reference that is not executable as
+       typed, or is stale against the record it points at;
+    3. which outbound messages were written without AI-provenance evidence, plus
+       how much sits dead-lettered.
+
+    Deliberately does **not** act on any of it: the dead-letter queue is
+    inspected through the existing read-only accessors, never retried in bulk,
+    because a mass retry of an alert pipeline would flood the bridge.
+    """
+    from modules import business_action_execution, outbound, scheduler
+    from modules.fazle_payroll_engine import review_linkage_repair
+
+    cash_rows = await review_linkage_repair.classify_all_pending_cash_transactions()
+    broken = [r for r in cash_rows
+              if str(r.get("classification")) == "TEST_ARTIFACT_SUSPECT"]
+    duplicates = [r for r in cash_rows
+                  if str(r.get("classification")) == "DUPLICATE_SUSPECT"]
+    orphaned = [r for r in cash_rows
+                if str(r.get("classification")) in ("ORPHANED", "INSUFFICIENT_EVIDENCE")]
+
+    proposals = await business_action_execution.audit_proposal_references()
+    stale_or_legacy = [
+        dict(p, proposal_id=p.get("id") or p.get("proposal_id")) for p in proposals
+        if (p.get("executable") is False) or p.get("migratable") or p.get("stale")
+    ]
+
+    # Provenance gaps: an outbound row whose queue item never recorded whether an
+    # LLM wrote the body. `ai_generated` is tri-state, so NULL is "unknown", not
+    # "human" -- that distinction is the whole point of the column.
+    provenance_rows = await fetch_all(
+        """
+        SELECT q.id AS queue_id, q.recipient, q.purpose, q.status, q.created_at
+          FROM fazle_outbound_queue q
+         WHERE q.created_at >= NOW() - INTERVAL '7 days'
+           AND COALESCE(q.meta_json->>'ai_generated', 'unknown') = 'unknown'
+         ORDER BY q.id DESC
+         LIMIT 50
+        """
+    )
+
+    dlq_total = int(await outbound.dlq_count() or 0)
+    dlq_actionable = int(await outbound.actionable_dlq_count() or 0)
+    dlq_entries = await outbound.list_dlq_entries(limit=20)
+    jobs = scheduler.list_job_names()
+
+    return {
+        "report": "data_hygiene",
+        "summary": {
+            "broken_provenance_cash_count": len(broken),
+            "duplicate_cash_suspect_count": len(duplicates),
+            "orphaned_cash_count": len(orphaned),
+            "stale_or_legacy_proposal_count": len(stale_or_legacy),
+            "outbound_missing_ai_provenance_count": len(provenance_rows),
+            "dlq_total": dlq_total,
+            "dlq_actionable_24h": dlq_actionable,
+            "scheduled_jobs": len(jobs),
+        },
+        "broken_provenance_cash": _jsonable(broken),
+        "stale_or_legacy_proposals": _jsonable(stale_or_legacy),
+        "outbound_missing_ai_provenance": _jsonable(provenance_rows),
+        "dlq_entries": _jsonable(dlq_entries),
+        "operator_actions": [
+            "review each broken-provenance cash row before approving it",
+            "migrate or retire legacy proposal references from the admin UI",
+            "retry dead letters one at a time via /api/outbound/dead-letters",
+        ],
+    }
+
+
 # ── Registry ─────────────────────────────────────────────────────────────────
 
 _BUILDERS: dict[str, Callable[..., Any]] = {
@@ -746,6 +822,7 @@ _BUILDERS: dict[str, Callable[..., Any]] = {
     "business_communication_summary": _b_business_communication_summary,
     "system_observation": _b_system_observation,
     "unresolved_fpe_employees": _b_unresolved_fpe_employees,
+    "data_hygiene": _b_data_hygiene,
 }
 
 
@@ -913,14 +990,59 @@ def render_text(payload: dict, max_rows: int = 25) -> str:
 
 # ── Owner overview (reused by the STATUS command) ────────────────────────────
 
+# Markers of an approval-queue entry that is *information*, not a decision the
+# owner can take: a legacy reference whose typed contract no longer executes it.
+# Stage I19/I20 ask for exactly this split, because a queue that mixes the two
+# trains the owner to approve things the system cannot run.
+_LEGACY_QUEUE_MARKERS = ("[LEGACY", "LEGACY —", "LEGACY -", "not executable")
+
+
+def _split_queue(items: list) -> tuple[list[str], list[str]]:
+    """(action_required, exceptions) — legacy/unexecutable entries move to the second."""
+    action: list[str] = []
+    exceptions: list[str] = []
+    for item in items or []:
+        text = str(item)
+        if any(marker in text for marker in _LEGACY_QUEUE_MARKERS):
+            exceptions.append(text)
+        else:
+            action.append(text)
+    return action, exceptions
+
+
 async def build_owner_overview(hours: int = 24) -> dict:
-    """'What needs my approval right now?' — built from the summary builder only."""
+    """'What needs my approval right now?' — built from the summary builder only.
+
+    Returns three buckets plus the numeric roll-up:
+
+    * ``action_required`` — decisions the owner can actually take now;
+    * ``exceptions`` — entries the system cannot execute (legacy / untyped
+      references). Reported, never silently dropped and never presented as an
+      approval button;
+    * ``fyi`` — things worth knowing, with nothing to decide.
+
+    ``queue`` is kept as the concatenation for callers written before the split.
+    """
     report = await _b_business_communication_summary(hours=hours)
     summary = report.get("summary") or {}
+    queue = report.get("approval_queue") or []
+    action_required, exceptions = _split_queue(queue)
+
+    fyi: list[str] = []
+    handled = summary.get("recruitment_autonomous_handled")
+    if handled:
+        fyi.append(f"recruitment: {handled} conversation(s) handled autonomously")
+    sent = summary.get("autonomous_replies_sent")
+    if sent:
+        fyi.append(f"autonomous replies sent in the last {hours}h: {sent}")
+
     return {
         "window_hours": hours,
-        "queue": report.get("approval_queue") or [],
-        "pending_total": summary.get("approval_queue_count", 0),
+        "action_required": action_required,
+        "exceptions": exceptions,
+        "fyi": fyi,
+        "queue": list(queue),
+        "pending_total": summary.get("approval_queue_count", len(queue)),
         "drafts": summary.get("pending_drafts_total", 0),
         "client_drafts": summary.get("client_pending_drafts", 0),
         "office_drafts": summary.get("office_internal_pending_drafts", 0),
@@ -932,8 +1054,17 @@ async def build_owner_overview(hours: int = 24) -> dict:
 
 
 def render_owner_overview(overview: dict) -> str:
+    """Render the three buckets as WhatsApp-safe text (no markdown tables)."""
+    action = overview.get("action_required")
+    exceptions = overview.get("exceptions")
+    fyi = overview.get("fyi")
+    if action is None and exceptions is None:
+        # an overview built before the split: everything is action
+        action, exceptions = _split_queue(overview.get("queue") or [])
+        fyi = fyi or []
+
     lines = [
-        "📊 এখন যা আপনার অনুমোদন চায়",
+        "📊 এখন যা আপনার সিদ্ধান্ত চায়",
         f"মোট অপেক্ষমাণ: {overview.get('pending_total', 0)}",
         f"ড্রাফট: {overview.get('drafts', 0)} "
         f"(ক্লায়েন্ট {overview.get('client_drafts', 0)} | "
@@ -941,16 +1072,25 @@ def render_owner_overview(overview: dict) -> str:
         f"ক্যাশ: {overview.get('cash_pending', 0)} | "
         f"উপস্থিতি: {overview.get('attendance_pending', 0)} | "
         f"এসকর্ট: {overview.get('escort_pending', 0)}",
+        "",
+        "ACTION REQUIRED",
     ]
-    queue = overview.get("queue") or []
-    if queue:
-        lines.append("")
-        lines.extend(f"  • {item}" for item in queue[:15])
-        if len(queue) > 15:
-            lines.append(f"  … আরও {len(queue) - 15}টি")
+    if action:
+        lines.extend(f"  • {item}" for item in action[:15])
     else:
-        lines.append("")
-        lines.append("✅ এই মুহূর্তে কিছুই অপেক্ষমাণ নেই।")
+        lines.append("  ✅ কিছু নেই")
+    lines.append("")
+    lines.append("EXCEPTIONS")
+    if exceptions:
+        lines.extend(f"  • {item}" for item in exceptions[:15])
+    else:
+        lines.append("  ✅ কিছু নেই")
+    lines.append("")
+    lines.append("FYI")
+    if fyi:
+        lines.extend(f"  • {item}" for item in fyi[:15])
+    else:
+        lines.append("  ✅ কিছু নেই")
     return "\n".join(lines)
 
 

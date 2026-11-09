@@ -80,11 +80,50 @@ RELAY_DEST_REFERENCE = ""
 RELAY_BRIDGE = "bridge2"
 RELAY_PURPOSE = "owner-accountant-payment-relay"
 
+# The four numbers above are intentionally blank: personal numbers must not live
+# in source (MASTER_PRODUCTION_PLAN §3). They are supplied through
+# PAYMENT_RELAY_SOURCE_NUMBER / _DEST_NUMBER / _RECEIVING_NUMBER plus
+# PAYMENT_RELAY_INBOUND_BRIDGE. Blank constants are safe but *silent* — the rule
+# can then never establish its protected scope and owner payments fall through to
+# generic routing — so `_enabled()` advertises the gap once per process.
+_warned_unconfigured = False
+
+
+def configured_numbers() -> dict:
+    """What the relay will actually compare against, for diagnostics."""
+    return {
+        "source": normalize_phone(_cfg("PAYMENT_RELAY_SOURCE_NUMBER", RELAY_SOURCE_NUMBER)) or "",
+        "dest": normalize_phone(_cfg("PAYMENT_RELAY_DEST_NUMBER", RELAY_DEST_NUMBER)) or "",
+        "receiving": normalize_phone(
+            _cfg("PAYMENT_RELAY_RECEIVING_NUMBER", RELAY_RECEIVING_NUMBER)) or "",
+        "inbound_bridge": _cfg("PAYMENT_RELAY_INBOUND_BRIDGE", RELAY_INBOUND_BRIDGE),
+        "outbound_bridge": _cfg("PAYMENT_RELAY_BRIDGE", RELAY_BRIDGE),
+    }
+
+
+def configuration_gap() -> str:
+    """Empty string when the relay is fully configured, else what is missing."""
+    nums = configured_numbers()
+    missing = [name for name in ("source", "dest") if not nums[name]]
+    if missing:
+        return ("PAYMENT_RELAY_* is enabled but " + ", ".join(missing)
+                + " number is not set — the relay will never fire and owner "
+                  "payment messages will be routed like any other message")
+    return ""
+
 
 def _enabled() -> bool:
-    return os.getenv("PAYMENT_RELAY_ENABLED", "false").strip().lower() in (
+    on = os.getenv("PAYMENT_RELAY_ENABLED", "false").strip().lower() in (
         "1", "true", "yes", "on",
     )
+    if on:
+        gap = configuration_gap()
+        if gap:
+            global _warned_unconfigured
+            if not _warned_unconfigured:
+                _warned_unconfigured = True
+                log.error("[payment_relay] %s", gap)
+    return on
 
 
 def _cfg(name: str, default: str) -> str:

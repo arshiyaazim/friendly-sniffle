@@ -490,9 +490,14 @@ async def _record_authorization_review(conn, row: dict, result) -> None:
 
 
 async def _send_with_channel(source_bridge: str, recipient: str, body: str, *, authorization=None) -> str:
+    """Send through a supported channel and return an external delivery id.
+
+    Refuses to send without a live TransportAuthorization: the queue worker
+    revalidates authorization before calling this, so reaching here without one
+    means a caller bypassed that gate.
+    """
     if not is_transport_authorized(authorization):
         raise PermissionError("transport authorization required")
-    """Send through a supported channel and return an external delivery id."""
     if source_bridge in {"meta", "meta_whatsapp", "messenger", "instagram", "facebook_comment"}:
         from modules.social_auto_reply.send_queue import (
             _send_comment, _send_instagram, _send_messenger, _send_meta_whatsapp,

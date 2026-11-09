@@ -1,23 +1,23 @@
-  """Optional CSV-backed contact registry."""
-  from __future__ import annotations
+"""Optional CSV-backed contact registry."""
+from __future__ import annotations
 
-  import csv
-  import logging
-  import os
-  import threading
-  from pathlib import Path
-  from typing import Optional
+import csv
+import logging
+import os
+import threading
+from pathlib import Path
+from typing import Optional
 
-  log = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
-  _REPO_ROOT = Path(__file__).resolve().parents[2]
-  _configured_path = os.getenv("OWNER_CONTACT_REGISTRY_PATH", "resources/owner_contacts.csv").strip()
-  _CSV_PATH = Path(_configured_path)
-  if not _CSV_PATH.is_absolute():
-     _CSV_PATH = _REPO_ROOT / _CSV_PATH
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_configured_path = os.getenv("OWNER_CONTACT_REGISTRY_PATH", "resources/owner_contacts.csv").strip()
+_CSV_PATH = Path(_configured_path)
+if not _CSV_PATH.is_absolute():
+   _CSV_PATH = _REPO_ROOT / _CSV_PATH
 
-  # Loaded frozenset of canonical 8801XXXXXXXXX phones.
-  # A lock guards the lazy load so the first concurrent caller doesn't double-read.
+# Loaded frozenset of canonical 8801XXXXXXXXX phones.
+# A lock guards the lazy load so the first concurrent caller doesn't double-read.
 _lock = threading.Lock()
 _loaded = False
 _registry: frozenset[str] = frozenset()
