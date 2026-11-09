@@ -872,4 +872,13 @@ class TestScopeIsolation:
         "tests/unit/test_recruitment_fee_canonical_text.py",
         "tests/unit/test_second_rebrand_and_recruitment_rag.py",
         "tests/support/private_data.py",
+        # 2026-11-09 — per-test database isolation and the module-object restore
+        # (see tests/support/db_isolation.py and the autouse fixtures in
+        # tests/conftest.py).
+        "tests/support/db_isolation.py",
+        "tests/unit/test_db_isolation.py",
+        "tests/unit/test_phase_c_wireins.py",
+        "tests/unit/test_bridge_send_control_maintenance.py",
+        "pytest.ini",
+        "tests/pytest.ini",
     }

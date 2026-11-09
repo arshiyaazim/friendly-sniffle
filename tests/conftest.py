@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from typing import AsyncGenerator, Generator
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -619,27 +620,17 @@ def override_env(tmp_path_factory):
 # so we never miss a table created by a new migration.
 
 async def _truncate_all_tables(conn: asyncpg.Connection) -> None:
-    """Truncate all tables in the public schema, RESTART IDENTITY CASCADE.
-    Skips fazle_roles (seed data must survive between tests)."""
-    rows = await conn.fetch("""
-        SELECT tablename FROM pg_tables
-        WHERE schemaname = 'public'
-          AND tablename != 'fazle_roles'
-        ORDER BY tablename
-    """)
-    if not rows:
-        return
-    table_names = [r["tablename"] for r in rows]
-    # Build a single TRUNCATE statement for all tables
-    safe_names = ", ".join(f'"{t}"' for t in table_names)
-    try:
-        await conn.execute(f"TRUNCATE TABLE {safe_names} RESTART IDENTITY CASCADE")
-    except Exception:
-        pass  # non-fatal — some tables may have FK cycles
-    # TRUNCATE ... CASCADE can clear referenced seed tables indirectly, even
-    # when fazle_roles itself is excluded from the generated table list.
-    # Restore the small immutable RBAC role catalog before the next test.
-    await conn.execute(_SEED_SQL)
+    """Truncate all public tables, RESTART IDENTITY CASCADE, and re-seed roles.
+
+    Delegates to `tests/support/db_isolation.py` so the schema-wide reset used
+    by the autouse isolation fixture and this per-pool teardown can never drift
+    apart. It also stops swallowing errors: the previous `except Exception:
+    pass` is how a foreign-key cycle could silently leave rows behind and
+    re-introduce the cross-test pollution this file now prevents.
+    """
+    from tests.support.db_isolation import reset_connection
+
+    await reset_connection(conn)
 
 
 @pytest_asyncio.fixture
@@ -807,6 +798,71 @@ def _reset_admin_command_dedup_cache():
     _dedup_cache.clear()
     yield
     _dedup_cache.clear()
+
+
+_ISOLATION_REPORTED = False
+
+
+@pytest.fixture(autouse=True)
+def _restore_module_objects():
+    """Put back any `sys.modules` entry a test replaced or deleted.
+
+    `tests/unit/test_phase_c_wireins.py` (correctly) pops `app` and
+    `app.config` from `sys.modules` to simulate a config failure, and restores
+    only `app.config`. The `app` *package object* it dropped came back as a
+    fresh module without the submodules that were already imported, so a later
+    test doing `monkeypatch.setattr("app.ollama.…")` failed with
+
+        AttributeError: module 'app' has no attribute 'ollama'
+
+    which is why test_route_b_handoff / test_stage_a_live_escort_verification /
+    test_site… passed alone and failed in a full session. Restoring replaced or
+    missing entries (never adding new ones, so genuine lazy imports survive)
+    keeps module identity stable across the run.
+    """
+    before = dict(sys.modules)
+    yield
+    for name, module in before.items():
+        if sys.modules.get(name, None) is not module:
+            sys.modules[name] = module
+
+
+@pytest.fixture(autouse=True)
+def _isolate_test_database_state(request):
+    """Start every test from an empty database (see tests/support/db_isolation).
+
+    Before this fixture existed the suite only passed if it ran in one specific
+    order: tests committed admin rows with the phone numbers from
+    `ADMIN_NUMBERS`, and a later test inserting the same admin died on
+    `duplicate key value violates unique constraint "fazle_admins_phone_key"`.
+    Eleven tests (test_rbac, test_route_b_handoff, test_stage_a_…,
+    test_trusted_group_escort_orders, test_bridge_send_control_maintenance)
+    therefore failed only in a full-session run.
+
+    The reset runs *before* the test, so a failure keeps its rows for
+    inspection. `FAZLE_TEST_DB_ISOLATION=off` and
+    `@pytest.mark.no_db_isolation` opt out (for a test that deliberately
+    asserts state carried over from an earlier step of the same module).
+    """
+    global _ISOLATION_REPORTED
+    if not _schema_setup_done:
+        yield
+        return
+    if os.getenv("FAZLE_TEST_DB_ISOLATION", "on").lower() in ("0", "off", "false", "no"):
+        yield
+        return
+    if request.node.get_closest_marker("no_db_isolation") is not None:
+        yield
+        return
+
+    from tests.support import db_isolation
+
+    tables = db_isolation.reset_database(TEST_DB_URL)
+    if not _ISOLATION_REPORTED:
+        _ISOLATION_REPORTED = True
+        print(f"\n[test-db] per-test isolation on: {len(tables)} tables reset "
+              f"before each test ({db_isolation.describe(tables)})")
+    yield
 
 
 @pytest.fixture(autouse=True)

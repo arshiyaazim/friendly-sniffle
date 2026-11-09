@@ -211,16 +211,18 @@ forward-fix-কে অগ্রাধিকার দিন।
 
 পুরো `tests/unit` বাস্তব PostgreSQL-এ চালিয়ে প্রথমে **১৭৫ failed + ২০ error** হয়েছিল।
 প্রতিটি ফাইল আলাদা করে চালিয়ে, কারণ ঠিক করে, আবার পুরো suite চালানো হয়েছে:
-এখন **৩২ failed, ০ error** (প্রতিটির কারণ README-র "Test suite reality" টেবিলে)।
-যেগুলো এখনো লাল, তার মধ্যে ১১টি কেবল পুরো suite একসাথে চালালে হয় — কারণ টেস্টগুলো
-DB-তে row commit করে rollback করে না, ফলে পরে একই phone number-এ
-`duplicate key ... fazle_admins_phone_key` পড়ে।
+এখন **১৯ failed, ০ error** (প্রতিটির কারণ README-র "Test suite reality" টেবিলে)।
 
-নিচের পাঁচটি সিদ্ধান্ত আপনার:
+- [x] **Per-test DB isolation** — সম্পন্ন (2026-11-09)। `tests/support/db_isolation.py`
+  প্রতি টেস্টের *আগে* শুধু নোংরা টেবিলগুলো truncate করে (~২৫ ms/টেস্ট, কারণ
+  পুরো schema truncate করতে ২.৪ সেকেন্ড লাগে) এবং `fazle_roles` ladder ফিরিয়ে
+  দেয়। সাথে `sys.modules` restore ও stub-এর নিচে import হওয়া মডিউল purge করা
+  হয়েছে। ফল: যে ১১+২টি টেস্ট কেবল পুরো suite-এ fail করত, সেগুলো এখন সব
+  পরিস্থিতিতে pass — এবং পুরো directory ঠিক সেই ১৯টি failure দেয় যা এক-একটা
+  ফাইল আলাদা চালালেও আসে। অর্থাৎ suite এখন **order-independent**।
+  বন্ধ করার উপায়: `FAZLE_TEST_DB_ISOLATION=off` বা `@pytest.mark.no_db_isolation`।
 
-- [ ] **Per-test DB isolation** — ১১টি order-dependent failure ঠিক করতে প্রতি টেস্টে
-  transaction rollback / schema-per-test দরকার। এটি করব কি? (এটি সবচেয়ে বড়
-  অবশিষ্ট কাজ, আর release gate-এর জন্য জরুরি।)
+নিচের চারটি সিদ্ধান্ত আপনার:
 - [ ] **`knowledge_base/**` ও `resources/ops/**`** — `.gitignore`-এ বাদ দেওয়া
   private corpus ছাড়া ৬টি টেস্ট চলে না। এগুলো এখন skip হয় (fail নয়)। সিদ্ধান্ত:
   corpus আলাদা private repo/storage-এ রাখবেন, নাকি টেস্টের জন্য sanitized

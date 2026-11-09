@@ -1480,7 +1480,7 @@ The audit measured this instead of repeating "82 tests pass":
 | The whole `tests/unit` against a real PostgreSQL 16.2 (schema built by `tests/conftest.py`: 107 migration files) | reached ~84% before the sandbox reclaimed the process: **175 failed, 20 errors** | yes |
 | The same DB-backed files on the *untouched* base commit (`086fea5`) | **identical failures** (`test_payment_relay`: 14/14) | yes |
 | The whole `tests/unit` again *after* the triage below (107 migration files, one session, same DB) | **32 failed, 0 errors** (was 175 failed, 20 errors) | yes |
-| The 40 files that failed the first run, re-run on their own | **19 failures** — the other 13 of the 32 only fail when the whole suite runs in one session (state leakage, below) | yes |
+| The same run *after* per-test database isolation and the module-object restore (below) | **19 failed, 0 errors** — **the same 19 the files produce when each one runs alone**, i.e. the suite is finally order-independent | yes |
 
 So a green number never meant "the business logic is proven": the DB-backed
 majority needs a database, and a real chunk of it failed on `master` independently
@@ -1492,20 +1492,49 @@ app's own suite cannot be used as a release gate until they are triaged.
 #### What the triage found (2026-11-06)
 
 Every file that failed the full run was re-run individually. The suite is now at
-**32 failed, 0 errors** (from 175 failed, 20 errors), and every remaining one is
-a *missing input*, a *documented divergence*, or *session state leakage* — not an
-unexplained red:
+**19 failed, 0 errors** (from 175 failed, 20 errors), it produces that same 19
+whether you run one file or the whole directory, and every remaining one is a
+*missing input* or a *documented divergence* — not an unexplained red:
 
 | Remaining failures | Count | Cause | Action |
 |---|---|---|---|
 | `test_rag_knowledge_base` (3), `test_reply_policy` (1), `test_k32_recruitment_reconciliation` (2) | 6 | need `knowledge_base/**` / the private FAQ corpus, which `.gitignore` excludes | skips when absent where the test allows it; the rest need the corpus |
 | `test_k32_recruitment_reconciliation` (2) | 2 | need `scripts/seed_recruitment_kb.sql` and `scripts/reconcile_recorded_k32.py`, which are **referenced by the tests and by migration 086 but were never committed** (`/scripts/*` is ignored) | needs the original migration run (Owner decision) |
-| `test_trusted_group_escort_orders` (3), `test_stage_a_live_escort_verification` (3), `test_route_b_handoff` (3), `test_rbac` (1), `test_bridge_send_control_maintenance` (1) | 11 | pass alone, fail in a full session: tests commit DB rows and never roll back, so later tests hit `duplicate key value violates unique constraint "fazle_admins_phone_key"` / already-registered pollers | the real fix is per-test transactional isolation (a schema-per-test or rollback fixture); see the note below |
 | `test_media_normalization_phase3` (3) | 3 | the test's premise is obsolete: `app/main.py` now stores `[media:<type>]` instead of dropping unsupported Meta messages | Owner decision |
 | `test_phase_c_wireins` (1), `test_conversation_memory` (1), `test_fpe_rules` (1) | 3 | assert **deployment configuration** (recruitment answer-first flag, stage-2/3 flags, `FPE_SYNC_CHAT_JIDS`), which is not in the repo by design | the tests should read config, not assume `.env` |
-| `test_scheduler_phase5b_trigger_wiring` (2), `test_escort_source_of_truth_refactor` (1), `test_stage3_mandatory_example` (1) | 4 | behavioural drift between the test's expectation and current code (bridge3 probe list, DB probe path, unmatched-confirmation queueing) | each needs a decision |
+| `test_scheduler_phase5b_trigger_wiring` (1), `test_escort_source_of_truth_refactor` (1) | 2 | behavioural drift between the test's expectation and current code (bridge3 probe list, unmatched-confirmation queueing) | each needs a decision |
 | `test_recruitment_ai_restricted` (1), `test_rag_startup_sync_boundary` (1) | 2 | Meta safe-mode path returns before `enqueue`, and the blanket `/knowledge_base/` ignore contradicts the lock-file-only expectation | documented; needs a decision on each |
 | `test_stage_h_financial_operations` (1) | 1 | needs `/home/user/hermes-runner/server.py`, an external install | environment, not code |
+
+#### Why the suite is now order-independent (2026-11-09)
+
+Thirteen tests used to pass on their own and fail in a full session. None of
+them was wrong; the *runner* was. Three leaks were found and closed:
+
+- **Database rows survived their test.** `tests/support/db_isolation.py` resets
+  the schema *before* each test: it counts the rows of every table in one
+  statement and truncates only the ones that are dirty (a full-schema
+  `TRUNCATE` costs 2.4 s here — 20 ms × 130 relations — so only the dirty
+  tables are touched, ~25 ms per test), then restores the `fazle_roles`
+  ladder. A failing test keeps its rows for inspection instead of having them
+  wiped by the next test's setup. Opt out with `FAZLE_TEST_DB_ISOLATION=off` or
+  `@pytest.mark.no_db_isolation`.
+- **`sys.modules` surgery leaked.** `test_phase_c_wireins` pops `app` /
+  `app.config` to prove the config gate fails closed and restores only
+  `app.config`; the `app` package object came back without the submodules
+  already imported (`AttributeError: module 'app' has no attribute 'ollama'`),
+  and any production module imported while its fake `app.database` was
+  installed bound the fakes forever (`TypeError: object list can't be used in
+  'await' expression`). `tests/conftest.py` now restores replaced or missing
+  `sys.modules` entries after every test, and that module purges whatever was
+  imported under its own stubs.
+- **Ambient configuration was assumed.** `test_bridge_send_control_maintenance`
+  asserted three poll tasks while `start_pollers()` defaults
+  `BRIDGE_OUTBOUND_CAPTURE_ENABLED` to *true*; it now pins the flag it is not
+  testing.
+
+Proof: 32 failed → **19 failed, 0 errors**, and the whole directory now
+produces exactly the same 19 as the per-file runs.
 
 Fixed during the triage (not test-blanket-work — real code or real test defects):
 
