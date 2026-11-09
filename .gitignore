@@ -129,6 +129,10 @@ RECRUITMENT_BOT_COORDINATION.md
 **/*.md
 !README.md
 !MASTER_PRODUCTION_PLAN.md
+# The open-decisions sheet is the counterpart to §10 of the plan: it records
+# what is blocked on an Owner answer and which workflow each blocker touches,
+# so it is a public guide in the same sense as the two above.
+!OPEN_DECISIONS.md
 
 # Keep one generic scanner; other scripts are operational or data-specific
 /scripts/*
