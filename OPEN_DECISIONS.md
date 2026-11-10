@@ -2,10 +2,11 @@
 
 তারিখ: ২০২৬-১১-১০ · শাখা: `arena/a91f5fb5-friendly-sniffle` · ভিত্তি: `master@8707417`
 
-পুরো `tests/unit` এখন **১৯ failed, ০ error** দেয়, আর প্রতিটি ফাইল আলাদা চালালেও
-ঠিক সেই ১৯টিই আসে (order-independent)। এই ডকুমেন্টে প্রতিটির (ক) আসলে কী জানতে
-চাওয়া হচ্ছে, (খ) কোন ফিচারের কোন ধাপে আটকায় — সেটি ওয়ার্কফ্লো সহ, (গ) কোন
-অপশনে কী পরিণতি।
+পুরো `tests/unit` এখন **১৫ failed, ০ error** দেয়, আর প্রতিটি ফাইল আলাদা চালালেও
+ঠিক সেই ১৫টিই আসে (order-independent)। ২০২৬-১১-১০-এ ৭ নম্বর গ্রুপের ৪টি
+(টেস্টের পুরোনো ভুল) ঠিক করা হয়েছে — ১৯ থেকে ১৫। এই ডকুমেন্টে প্রতিটির (ক) আসলে
+কী জানতে চাওয়া হচ্ছে, (খ) কোন ফিচারের কোন ধাপে আটকায় — সেটি ওয়ার্কফ্লো সহ,
+(গ) কোন অপশনে কী পরিণতি।
 
 ---
 
@@ -18,8 +19,11 @@
 | ৩ | `[media:<type>]` আচরণ | ৩ | **আপনার সিদ্ধান্ত** (জমা রাখা vs ফেলে দেওয়া) |
 | ৪ | `.gitignore`-এ authority register | ১ | **আপনার সিদ্ধান্ত** (public repo-তে ব্যবসায়িক সংখ্যা?) |
 | ৫ | Deployment `.env`-নির্ভর assertion | ২ | আপনার উত্তর দরকার (production-এ সত্যিই ON?) |
-| ৬ | পুরোনো টেস্ট, কোড বদলেছে | ৪ | কোড নয় — টেস্ট ঠিক করা (আমি করতে পারি) |
+| ৬ | পুরোনো টেস্ট, কোড বদলেছে | ~~৪~~ **০** | **সম্পন্ন ২০২৬-১১-১০** |
 | ৭ | বাহ্যিক ইনস্টল | ১ | পরিবেশ (`hermes-runner`) |
+
+বাকি মোট: **১৫** = ৬ (corpus) + ২ (K3.2 scripts) + ৩ (media) + ১ (`.gitignore`) +
+২ (flags) + ১ (hermes-runner)।
 
 ---
 
@@ -204,14 +208,16 @@ modules/knowledge_base.get_reply(text, intent)
 
 ---
 
-## ৬. পুরোনো টেস্ট — কোড নয়, টেস্ট ঠিক করা (৪টি)
+## ৬. পুরোনো টেস্ট — কোড নয়, টেস্ট ঠিক করা (৪টি) — ✅ সম্পন্ন (২০২৬-১১-১০)
 
-| টেস্ট | আসল কারণ | সমাধান |
+চারটিই ঠিক করা হয়েছে, কোনো ব্যবসায়িক সিদ্ধান্ত ছাড়াই। `tests/unit` ফল: **১৫ failed**।
+
+| টেস্ট | আসল কারণ | যা করা হলো |
 |---|---|---|
-| `test_scheduler_phase5b…::test_bridge3_probes…` | টেস্ট hardcoded `/home/azim/whatsapp3/store/messages.db`; প্রোব এখন `settings.bridge3_db_path` পড়ে (ডিফল্ট `store/bridge3/messages.db`) | sibling টেস্টের মতো `get_settings()` থেকে পড়া |
-| `test_escort_source_of_truth_refactor::test_no_match_queues…` | `_is_authoritative_bridge_confirmation()` recipient ছাড়া শুধু **admin** নম্বর লíst দেখে; টেস্ট `BRIDGE2_NUMBER` সেট করে কিন্তু `ADMIN_BRIDGE2_NUMBER` নয় ⇒ `""` ফেরে | টেস্টে admin নম্বর config করা (এবং প্রশ্ন: bridge-map fallback যোগ করব কি — নিরাপত্তা-সংবেদনশীল) |
-| `test_recruitment_ai_restricted::test_meta_recruitment_safe_mode…` | `_save_message` mock → MagicMock id → `message_router.inbound_execution()` None দেয় ⇒ enqueue-এর আগেই return | provenance layer-টি টেস্টে patch করা |
-| `test_fpe_rules::test_allowlisted_sync_chat…` | `FPE_SYNC_CHAT_JIDS` env খালি ⇒ allowlisted chat blocked | টেস্টে env সেট করা (synthetic নম্বর) |
+| `test_scheduler_phase5b…::test_bridge3_probes…` | টেস্ট hardcoded `/home/azim/whatsapp3/store/messages.db`; প্রোব এখন `settings.bridge3_db_path` পড়ে | sibling টেস্টের মতো `get_settings().bridge3_db_path`-এর সাথে তুলনা |
+| `test_escort_source_of_truth_refactor::test_no_match_queues…` | `_is_authoritative_bridge_confirmation()` recipient ছাড়া শুধু **admin** নম্বর দেখে; টেস্ট `BRIDGE2_NUMBER` সেট করত, `ADMIN_BRIDGE2_NUMBER` নয় ⇒ `""` ফিরত | helper-এ `ADMIN_BRIDGE2_NUMBER` যোগ; negative টেস্ট দুটি (ভুল sender / ভুল recipient) এখনো rejection-ই দাবি করে |
+| `test_recruitment_ai_restricted::test_meta_recruitment_safe_mode…` | টেস্ট `message_router.inbound_execution`-এর আগের যুগের; mock করা `_save_message` provenance claim-এ None ⇒ enqueue-এর আগেই return | `_save_message` আসল id দেয়, provenance scope stub করা |
+| `test_fpe_rules::test_allowlisted_sync_chat…` | gate `FPE_SYNC_CHAT_JIDS` পড়ে, টেস্টে সেটি খালি ⇒ accountant-এর chat-ও blocked | টেস্টে `FPE_SYNC_CHAT_JIDS` সেট + settings cache clear |
 
 ## ৭. বাহ্যিক ইনস্টল (১টি)
 
@@ -230,4 +236,4 @@ hermes-runner ইনস্টল করা নেই, তাই টেস্ট�
 | media (A) | ৩ | কাস্টমার media মেসেজের অডিট trail |
 | `.gitignore` (A) | ১ | authority পরিবর্তনের ইতিহাস tracked |
 | `.env` flags (উত্তর) | ২ | deployment চুক্তি বনাম কোড ডিফল্ট স্পষ্ট হবে |
-| ৬ নম্বর গ্রুপ | ৪ | (কোনো ব্যবসায়িক সিদ্ধান্ত নেই) |
+| ৬ নম্বর গ্রুপ | ~~৪~~ **৪ ✅** | সম্পন্ন — কোনো ব্যবসায়িক সিদ্ধান্ত ছাড়াই |

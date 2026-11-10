@@ -284,7 +284,22 @@ class TestEmployeeNameValidation:
 
 
 class TestPayrollParseGate:
-    """Bridge1 review-only messages must not reach the payroll parser."""
+    """Bridge1 review-only messages must not reach the payroll parser.
+
+    The allowlist is configuration (`FPE_SYNC_CHAT_JIDS`, falling back to
+    `ACCOUNTANT_PHONE`) and is empty in a test environment, so the positive case
+    below sets the very setting the gate reads. Without it,
+    `_should_skip_payroll_parse()` correctly reported
+    "non_payroll_or_unauthorized_source" for the accountant's own chat and the
+    test looked like a parser regression.
+    """
+
+    @staticmethod
+    def _allow_sync_chat(monkeypatch, *jids: str) -> None:
+        monkeypatch.setenv("FPE_SYNC_CHAT_JIDS", ",".join(jids))
+        from app.config import get_settings
+
+        get_settings.cache_clear()
 
     def test_bridge1_attendance_draft_is_blocked(self):
         row = {
@@ -299,7 +314,8 @@ class TestPayrollParseGate:
         assert blocked
         assert reason in {"review_only_marker", "non_payroll_or_unauthorized_source"}
 
-    def test_allowlisted_sync_chat_is_not_blocked(self):
+    def test_allowlisted_sync_chat_is_not_blocked(self, monkeypatch):
+        self._allow_sync_chat(monkeypatch, "8801844836824@s.whatsapp.net")
         row = {
             "source": "bridge2",
             "chat_jid": "8801844836824@s.whatsapp.net",

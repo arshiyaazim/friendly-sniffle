@@ -1481,6 +1481,7 @@ The audit measured this instead of repeating "82 tests pass":
 | The same DB-backed files on the *untouched* base commit (`086fea5`) | **identical failures** (`test_payment_relay`: 14/14) | yes |
 | The whole `tests/unit` again *after* the triage below (107 migration files, one session, same DB) | **32 failed, 0 errors** (was 175 failed, 20 errors) | yes |
 | The same run *after* per-test database isolation and the module-object restore (below) | **19 failed, 0 errors** — **the same 19 the files produce when each one runs alone**, i.e. the suite is finally order-independent | yes |
+| The same run after the four stale-test fixes of 2026-11-10 | **15 failed, 0 errors** | yes |
 
 So a green number never meant "the business logic is proven": the DB-backed
 majority needs a database, and a real chunk of it failed on `master` independently
@@ -1492,18 +1493,18 @@ app's own suite cannot be used as a release gate until they are triaged.
 #### What the triage found (2026-11-06)
 
 Every file that failed the full run was re-run individually. The suite is now at
-**19 failed, 0 errors** (from 175 failed, 20 errors), it produces that same 19
+**15 failed, 0 errors** (from 175 failed, 20 errors), it produces that same 15
 whether you run one file or the whole directory, and every remaining one is a
-*missing input* or a *documented divergence* — not an unexplained red:
+*missing input* or a *documented divergence* — not an unexplained red (see
+[`OPEN_DECISIONS.md`](OPEN_DECISIONS.md) for which workflow each one blocks):
 
 | Remaining failures | Count | Cause | Action |
 |---|---|---|---|
 | `test_rag_knowledge_base` (3), `test_reply_policy` (1), `test_k32_recruitment_reconciliation` (2) | 6 | need `knowledge_base/**` / the private FAQ corpus, which `.gitignore` excludes | skips when absent where the test allows it; the rest need the corpus |
 | `test_k32_recruitment_reconciliation` (2) | 2 | need `scripts/seed_recruitment_kb.sql` and `scripts/reconcile_recorded_k32.py`, which are **referenced by the tests and by migration 086 but were never committed** (`/scripts/*` is ignored) | needs the original migration run (Owner decision) |
 | `test_media_normalization_phase3` (3) | 3 | the test's premise is obsolete: `app/main.py` now stores `[media:<type>]` instead of dropping unsupported Meta messages | Owner decision |
-| `test_phase_c_wireins` (1), `test_conversation_memory` (1), `test_fpe_rules` (1) | 3 | assert **deployment configuration** (recruitment answer-first flag, stage-2/3 flags, `FPE_SYNC_CHAT_JIDS`), which is not in the repo by design | the tests should read config, not assume `.env` |
-| `test_scheduler_phase5b_trigger_wiring` (1), `test_escort_source_of_truth_refactor` (1) | 2 | behavioural drift between the test's expectation and current code (bridge3 probe list, unmatched-confirmation queueing) | each needs a decision |
-| `test_recruitment_ai_restricted` (1), `test_rag_startup_sync_boundary` (1) | 2 | Meta safe-mode path returns before `enqueue`, and the blanket `/knowledge_base/` ignore contradicts the lock-file-only expectation | documented; needs a decision on each |
+| `test_phase_c_wireins` (1), `test_conversation_memory` (1) | 2 | assert **deployment configuration** (recruitment answer-first/factcheck flags, conversation-memory flags) that the code and `.env.example` default to off | needs an answer about the live deployment (see `OPEN_DECISIONS.md` §5) |
+| `test_rag_startup_sync_boundary` (1) | 1 | the blanket `/knowledge_base/` ignore contradicts the lock-file-only expectation | needs a publication decision (`OPEN_DECISIONS.md` §4) |
 | `test_stage_h_financial_operations` (1) | 1 | needs `/home/user/hermes-runner/server.py`, an external install | environment, not code |
 
 #### Why the suite is now order-independent (2026-11-09)
@@ -1533,8 +1534,9 @@ them was wrong; the *runner* was. Three leaks were found and closed:
   `BRIDGE_OUTBOUND_CAPTURE_ENABLED` to *true*; it now pins the flag it is not
   testing.
 
-Proof: 32 failed → **19 failed, 0 errors**, and the whole directory now
-produces exactly the same 19 as the per-file runs.
+Proof: 32 failed → **19 failed, 0 errors**, and the whole directory produces
+exactly the same set as the per-file runs. Four of those were then fixed
+outright (2026-11-10, see below), leaving **15**.
 
 Fixed during the triage (not test-blanket-work — real code or real test defects):
 
@@ -1558,6 +1560,24 @@ Fixed during the triage (not test-blanket-work — real code or real test defect
   in source (correctly — they are personal data). They now skip with a named
   reason via `tests/support/private_data.py`, or set the number as configuration
   the way an operator would.
+
+Four more were stale assertions rather than missing inputs, fixed on 2026-11-10:
+
+- `test_scheduler_phase5b_trigger_wiring` asserted the literal
+  `/home/azim/whatsapp3/store/messages.db`; the probe reads
+  `settings.bridge3_db_path`. It now compares against the setting, like its
+  bridge1/bridge2 sibling already did.
+- `test_escort_source_of_truth_refactor` never configured `ADMIN_BRIDGE2_NUMBER`,
+  which `_is_authoritative_bridge_confirmation()` needs for a recipient-less
+  confirmation, so the gate rejected everything and the unmatched-confirmation
+  queue was never reached. The helper sets it now; the two negative tests (wrong
+  sender, wrong recipient) still assert rejection.
+- `test_recruitment_ai_restricted`'s Meta test predates
+  `message_router.inbound_execution()`: with a mocked `_save_message` the
+  provenance claim yields `None` and the function returns before `enqueue`. The
+  test now stubs the id and the provenance scope.
+- `test_fpe_rules` expected the accountant's sync chat to be allowlisted while
+  `FPE_SYNC_CHAT_JIDS` (the setting the gate reads) was empty; the test sets it.
 
 What did change is that a missing database no longer produces 700 cryptic
 "Schema setup failed" errors: `tests/conftest.py` installs a no-database guard

@@ -356,7 +356,16 @@ class TestBuildHealthBridge3Coverage:
         for key in ("bridge1_db", "bridge2_db", "bridge3_db", "bridge_poller_b1", "bridge_poller_b2", "bridge_poller_b3"):
             assert key in probes, f"{key} missing from /health probes"
         assert probes["bridge3_db"]["label"] == "bridge3"
-        assert probes["bridge3_db"]["path"] == "/home/azim/whatsapp3/store/messages.db"
+        # Assert against the setting the probe actually reads, exactly like
+        # test_bridge1_and_bridge2_probe_shape_unchanged does. The literal
+        # "/home/azim/whatsapp3/store/messages.db" that used to sit here was the
+        # same divergence-prone duplication that kept this probe reporting a
+        # stale store path after the settings-based fix: the path is deployment
+        # configuration (BRIDGE3_DB_PATH), and hardcoding one owner's home
+        # directory also made the test fail on every other machine.
+        from app.config import get_settings
+
+        assert probes["bridge3_db"]["path"] == get_settings().bridge3_db_path
         assert probes["bridge_poller_b3"]["service"] == "bridge_poller:bridge3"
 
     async def test_bridge1_and_bridge2_probe_shape_unchanged(self, monkeypatch):
