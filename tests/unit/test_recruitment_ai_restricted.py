@@ -225,18 +225,45 @@ def test_existing_non_recruitment_behavior_unchanged():
 
 
 async def test_meta_recruitment_safe_mode_bypass_uses_queue_compatible_channel():
+    """Safe-mode recruitment bypass must reach the outbound queue with a
+    `source_bridge` the queue accepts and a bounded idempotency key.
+
+    This test predates the message_router provenance layer. `_handle_meta_message`
+    now saves the row and enters `modules.message_router.inbound_execution(...)`
+    before any reply work; that helper claims the row in PostgreSQL and yields
+    `None` when it cannot — which is what a mocked `_save_message` produced, so
+    the function returned before `enqueue` was ever called and the assertions
+    saw `enqueue.await_args is None`. Both the saved id and the provenance scope
+    are stubbed here, so the test measures the queue contract it was written
+    for (provenance has its own coverage in test_message_router_*).
+    """
+    from contextlib import asynccontextmanager
+
     from app.main import _handle_meta_message
+
+    @asynccontextmanager
+    async def _fake_inbound_execution(core_message_id, source, source_message_ref, **identity):
+        yield {
+            "core_message_id": core_message_id,
+            "source": source,
+            "source_message_ref": source_message_ref,
+            "processing_outcome": "done",
+            "actions": [],
+            "active": True,
+        }
 
     enqueue = AsyncMock(return_value=321)
     with (
         patch("app.main._process_message", new=AsyncMock(return_value=("reply", None))),
         patch("app.main._should_recruitment_autoreply", new=AsyncMock(return_value=True)),
         patch("app.main._force_draft_by_saved_contact_name", new=AsyncMock(return_value=False)),
-        patch("app.main._save_message", new=AsyncMock()),
+        patch("app.main._save_message", new=AsyncMock(return_value=901)),
         patch("app.main.record_heartbeat", new=AsyncMock()),
         patch("app.main.fetch_one", new=AsyncMock(return_value=None)),
         patch("app.main._record_meta_delivery_state", new=AsyncMock()),
         patch("app.main._social_auto_reply_single_engine", return_value=False),
+        patch("modules.message_router.inbound_execution", new=_fake_inbound_execution),
+        patch("modules.message_router.record_inbound_action"),
         patch("modules.outbound.enqueue", new=enqueue),
     ):
         await _handle_meta_message(

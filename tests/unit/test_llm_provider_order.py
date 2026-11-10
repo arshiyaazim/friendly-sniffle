@@ -879,6 +879,12 @@ class TestScopeIsolation:
         "tests/unit/test_db_isolation.py",
         "tests/unit/test_phase_c_wireins.py",
         "tests/unit/test_bridge_send_control_maintenance.py",
+        # 2026-11-10 — the four stale tests from OPEN_DECISIONS.md group 6.
+        "tests/unit/test_scheduler_phase5b_trigger_wiring.py",
+        "tests/unit/test_escort_source_of_truth_refactor.py",
+        "tests/unit/test_fpe_rules.py",
+        "tests/unit/test_recruitment_ai_restricted.py",
+        "OPEN_DECISIONS.md",
         "pytest.ini",
         "tests/pytest.ini",
     }

@@ -14,6 +14,22 @@ def _set_escort_env(monkeypatch, clients: str = "8801670535255,8801955555555") -
     monkeypatch.setenv("ESCORT_TRUSTED_SOURCES", "bridge1,bridge2")
     monkeypatch.setenv("BRIDGE1_NUMBER", "8801958122300")
     monkeypatch.setenv("BRIDGE2_NUMBER", "8801880446111")
+    # The admin number is what makes a reply *from the bridge* authoritative when
+    # the confirmation has no client recipient attached:
+    #
+    #   _is_authoritative_bridge_confirmation()
+    #     recipient empty  →  return bridge_number in admin_numbers
+    #
+    # admin_numbers is built from ADMIN_META_NUMBER / ADMIN_BRIDGE1_NUMBER /
+    # ADMIN_BRIDGE2_NUMBER / ADMIN_NUMBERS, none of which were set here, so the
+    # gate rejected every recipient-less confirmation and
+    # handle_admin_escort_completion() returned ("", None) before the
+    # unmatched-confirmation queue could be reached. In production the operator
+    # sets these (they are personal numbers, so they are configuration, not
+    # source), which is why the queue worked live and this test did not.
+    # Adding it does not weaken the two negative tests in this file: a message
+    # from an unknown sender, or to a non-client recipient, is still rejected.
+    monkeypatch.setenv("ADMIN_BRIDGE2_NUMBER", "8801880446111")
     from app.config import get_settings
     get_settings.cache_clear()
 
